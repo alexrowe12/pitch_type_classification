@@ -3,6 +3,7 @@
 .cache/
 clips/
 processed/
+debug/
 __pycache__/
 *.pyc
 download_errors.log
