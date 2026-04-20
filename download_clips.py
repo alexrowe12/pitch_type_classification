@@ -94,6 +94,28 @@ def stratified_sample(data: dict, limit: int) -> dict:
     return sampled
 
 
+def filter_valid_clips(data: dict) -> tuple[dict, int]:
+    """Filter out clips with bad data (unknown pitch type, negative timestamps).
+    Returns (filtered_data, num_removed)."""
+    valid = {}
+    for clip_id, clip in data.items():
+        pitch_type = clip.get("type", "unknown")
+        start = clip.get("start", 0)
+        end = clip.get("end", 0)
+
+        # Skip unknown pitch types
+        if pitch_type == "unknown":
+            continue
+
+        # Skip negative or invalid timestamps
+        if start < 0 or end < 0 or end <= start:
+            continue
+
+        valid[clip_id] = clip
+
+    return valid, len(data) - len(valid)
+
+
 def filter_by_types(data: dict, pitch_types: list) -> dict:
     """Filter dataset to only include specified pitch types."""
     return {
@@ -180,6 +202,11 @@ def main():
     print("Loading dataset...")
     data = load_dataset(DATA_JSON)
     print(f"Total clips in dataset: {len(data)}")
+
+    # Filter out bad data (unknown pitch types, negative timestamps)
+    data, removed = filter_valid_clips(data)
+    print(f"Filtered out {removed} invalid clips (unknown type or bad timestamps)")
+    print(f"Valid clips: {len(data)}")
 
     # Filter by pitch types if specified
     if args.types:
