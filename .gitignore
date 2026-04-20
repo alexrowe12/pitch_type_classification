@@ -1,1 +1,7 @@
 .claude
+.venv/
+.cache/
+clips/
+__pycache__/
+*.pyc
+download_errors.log
