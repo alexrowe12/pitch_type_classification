@@ -32,7 +32,7 @@ except ImportError:
 DATA_JSON = "mlb-youtube-repo/data/mlb-youtube-segmented.json"
 OUTPUT_DIR = Path("clips")
 ERROR_LOG = "download_errors.log"
-DEFAULT_WORKERS = 4
+DEFAULT_WORKERS = 8
 
 ERROR_LOG_LOCK = threading.Lock()
 
