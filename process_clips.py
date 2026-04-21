@@ -28,11 +28,14 @@ OUTPUT_DIR = Path("processed")
 METADATA_JSON = "mlb-youtube-repo/data/mlb-youtube-segmented.json"
 
 # Processing settings
-NUM_FRAMES = 16          # Frames to extract from pitch window
-IMAGE_SIZE = 128         # Output image size (smaller = faster training)
+NUM_FRAMES = 24          # Frames to extract from pitch window
+IMAGE_SIZE = 224         # Larger output to preserve ball detail
 CROP_RATIO = 0.6         # Keep center 60% of frame (action zone)
-MOTION_WINDOW = 30       # Frames to analyze for motion peak (~1 sec at 30fps)
 MIN_GREEN_RATIO = 0.05   # Minimum green (grass) content to be valid pitch footage
+SEARCH_START_RATIO = 0.22  # Ignore more early clip frames when finding release
+SEARCH_END_RATIO = 0.85    # Ignore late clip frames to avoid swing/contact bias
+PEAK_THRESHOLD_STD = 1.3   # Stronger motion threshold for candidate peaks
+MIN_PEAK_RELATIVE_HEIGHT = 0.55  # Ignore weak peaks even if they cross the threshold
 
 # Pitch type mapping
 OFFSPEED_TYPES = {"slider", "curveball", "changeup", "sinker", "knucklecurve"}
@@ -63,8 +66,11 @@ def compute_motion_signal(frames: np.ndarray) -> np.ndarray:
     Returns:
         1D array of motion intensity per frame (length N-1)
     """
+    # Focus motion analysis on the center action region to reduce crowd/overlay noise.
+    roi_frames = np.array([crop_to_action_zone(frame) for frame in frames])
+
     # Convert to grayscale for faster computation
-    gray_frames = np.array([cv2.cvtColor(f, cv2.COLOR_RGB2GRAY) for f in frames])
+    gray_frames = np.array([cv2.cvtColor(f, cv2.COLOR_RGB2GRAY) for f in roi_frames])
 
     # Compute absolute differences between consecutive frames
     diffs = np.abs(gray_frames[1:].astype(np.float32) - gray_frames[:-1].astype(np.float32))
@@ -80,41 +86,41 @@ def compute_motion_signal(frames: np.ndarray) -> np.ndarray:
     return motion_smooth
 
 
-def find_pitch_window(motion_signal: np.ndarray, window_size: int = MOTION_WINDOW) -> tuple[int, int]:
-    """Find the FIRST significant motion spike (the pitch, not the swing).
+def find_pitch_peak(motion_signal: np.ndarray) -> int:
+    """Find the first strong local motion peak near pitch release.
 
-    The pitch always happens before the batter swings. We find the first
-    window where motion exceeds a threshold, rather than the maximum
-    (which might be the swing/hit).
-
-    Args:
-        motion_signal: 1D array of motion intensities
-        window_size: Size of window to find
-
-    Returns:
-        (start_frame, end_frame) tuple
+    We ignore the very start/end of the clip and look for the first local peak
+    above a stronger threshold. This reduces false detections from setup motion
+    before the pitch and larger motion from the batter swing after release.
     """
-    if len(motion_signal) < window_size:
-        return 0, len(motion_signal)
+    if len(motion_signal) == 0:
+        return 0
 
-    # Compute rolling sum for windows
-    cumsum = np.cumsum(motion_signal)
-    rolling_sum = cumsum[window_size:] - cumsum[:-window_size]
+    search_start = max(1, int(len(motion_signal) * SEARCH_START_RATIO))
+    search_end = min(len(motion_signal) - 1, int(len(motion_signal) * SEARCH_END_RATIO))
 
-    # Find threshold: windows with motion above mean + 0.5*std are "significant"
-    threshold = np.mean(rolling_sum) + 0.5 * np.std(rolling_sum)
+    if search_end <= search_start:
+        return int(np.argmax(motion_signal))
 
-    # Find FIRST window that exceeds threshold
-    above_threshold = np.where(rolling_sum > threshold)[0]
+    search_signal = motion_signal[search_start:search_end]
+    threshold = np.mean(search_signal) + PEAK_THRESHOLD_STD * np.std(search_signal)
+    relative_height_threshold = np.max(search_signal) * MIN_PEAK_RELATIVE_HEIGHT
 
-    if len(above_threshold) > 0:
-        # Take the first significant window
-        peak_start = above_threshold[0]
-    else:
-        # Fallback to maximum if nothing exceeds threshold
-        peak_start = np.argmax(rolling_sum)
+    candidate_peaks = []
+    for idx in range(search_start + 1, search_end - 1):
+        value = motion_signal[idx]
+        if (
+            value >= threshold
+            and value >= relative_height_threshold
+            and value >= motion_signal[idx - 1]
+            and value >= motion_signal[idx + 1]
+        ):
+            candidate_peaks.append(idx)
 
-    return peak_start, peak_start + window_size
+    if candidate_peaks:
+        return candidate_peaks[0]
+
+    return search_start + int(np.argmax(search_signal))
 
 
 def crop_to_action_zone(frame: np.ndarray, crop_ratio: float = CROP_RATIO) -> np.ndarray:
@@ -193,9 +199,36 @@ def read_all_frames(video_path: Path) -> np.ndarray | None:
     return np.array(frames)
 
 
+def enhance_ball_visibility(frame: np.ndarray) -> np.ndarray:
+    """Preserve small bright details in the action zone."""
+    frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+    lab = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2LAB)
+    l_channel, a_channel, b_channel = cv2.split(lab)
+
+    clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+    l_enhanced = clahe.apply(l_channel)
+    enhanced_bgr = cv2.cvtColor(cv2.merge((l_enhanced, a_channel, b_channel)), cv2.COLOR_LAB2BGR)
+
+    hsv = cv2.cvtColor(enhanced_bgr, cv2.COLOR_BGR2HSV)
+    bright_mask = cv2.inRange(hsv, np.array([0, 0, 170]), np.array([180, 70, 255]))
+    bright_mask = cv2.GaussianBlur(bright_mask, (5, 5), 0).astype(np.float32) / 255.0
+
+    sharpened = cv2.addWeighted(
+        enhanced_bgr,
+        1.25,
+        cv2.GaussianBlur(enhanced_bgr, (0, 0), 1.2),
+        -0.25,
+        0
+    )
+    blended = enhanced_bgr.astype(np.float32) * (1.0 - 0.35 * bright_mask[..., None])
+    blended += sharpened.astype(np.float32) * (0.35 * bright_mask[..., None])
+
+    return cv2.cvtColor(np.clip(blended, 0, 255).astype(np.uint8), cv2.COLOR_BGR2RGB)
+
+
 def extract_pitch_frames(
     all_frames: np.ndarray,
-    start_frame: int,
+    peak_frame: int,
     num_frames: int = NUM_FRAMES,
     image_size: int = IMAGE_SIZE
 ) -> np.ndarray:
@@ -203,15 +236,17 @@ def extract_pitch_frames(
 
     Args:
         all_frames: All video frames (N, H, W, C)
-        start_frame: Starting frame index
+        peak_frame: Peak motion frame index
         num_frames: Number of frames to extract
         image_size: Output image size
 
     Returns:
         Processed frames (num_frames, image_size, image_size, 3) normalized to 0-1
     """
-    # Ensure we don't go past the end
-    end_frame = min(start_frame + num_frames, len(all_frames))
+    # Keep a short lead-in, but bias more of the sequence after release.
+    pre_peak_frames = 4
+    start_frame = max(0, peak_frame - pre_peak_frames)
+    end_frame = min(len(all_frames), start_frame + num_frames)
     start_frame = max(0, end_frame - num_frames)
 
     # Extract frames
@@ -225,8 +260,9 @@ def extract_pitch_frames(
     for frame in pitch_frames[:num_frames]:
         # Crop to action zone
         cropped = crop_to_action_zone(frame)
+        enhanced = enhance_ball_visibility(cropped)
         # Resize
-        resized = cv2.resize(cropped, (image_size, image_size))
+        resized = cv2.resize(enhanced, (image_size, image_size), interpolation=cv2.INTER_CUBIC)
         processed.append(resized)
 
     # Stack and normalize
@@ -282,15 +318,15 @@ def process_clip(
     # Compute motion signal
     motion_signal = compute_motion_signal(all_frames)
 
-    # Find pitch window
-    start_frame, end_frame = find_pitch_window(motion_signal)
+    # Find the strongest early peak corresponding to pitch release.
+    peak_frame = find_pitch_peak(motion_signal)
 
-    # Extract pitch frames
-    frames = extract_pitch_frames(all_frames, start_frame)
+    # Extract frames centered around the detected release peak.
+    frames = extract_pitch_frames(all_frames, peak_frame)
 
     # Debug: save motion plot and sample frames
     if debug:
-        save_debug_visualization(clip_id, all_frames, motion_signal, start_frame, end_frame, frames)
+        save_debug_visualization(clip_id, all_frames, motion_signal, peak_frame, frames)
 
     if preview:
         return {
@@ -299,7 +335,7 @@ def process_clip(
             "binary_label": binary_label,
             "split": split,
             "total_frames": len(all_frames),
-            "pitch_window": (start_frame, end_frame),
+            "pitch_window": (max(0, peak_frame - 4), min(len(all_frames), peak_frame + 20)),
             "output_shape": frames.shape,
             "saved": False
         }
@@ -315,7 +351,7 @@ def process_clip(
         "binary_label": binary_label,
         "split": split,
         "total_frames": len(all_frames),
-        "pitch_window": (start_frame, end_frame),
+        "pitch_window": (max(0, peak_frame - 4), min(len(all_frames), peak_frame + 20)),
         "output_shape": frames.shape,
         "saved": True,
         "path": str(out_path)
@@ -326,8 +362,7 @@ def save_debug_visualization(
     clip_id: str,
     all_frames: np.ndarray,
     motion_signal: np.ndarray,
-    start_frame: int,
-    end_frame: int,
+    peak_frame: int,
     processed_frames: np.ndarray
 ):
     """Save debug visualization showing motion detection results."""
@@ -343,9 +378,7 @@ def save_debug_visualization(
     # Top row: motion signal
     ax = axes[0, 0]
     ax.plot(motion_signal)
-    ax.axvline(start_frame, color='r', linestyle='--', label='Pitch start')
-    ax.axvline(end_frame, color='r', linestyle='--', label='Pitch end')
-    ax.axvspan(start_frame, end_frame, alpha=0.3, color='red')
+    ax.axvline(peak_frame, color='r', linestyle='--', label='Release peak')
     ax.set_title(f'Motion Signal - {clip_id}')
     ax.set_xlabel('Frame')
     ax.set_ylabel('Motion Intensity')
@@ -353,10 +386,10 @@ def save_debug_visualization(
 
     # Show frames before, during, after pitch
     frame_indices = [
-        max(0, start_frame - 20),  # Before pitch
-        start_frame,                # Pitch start
-        (start_frame + end_frame) // 2,  # Mid pitch
-        min(len(all_frames)-1, end_frame + 10)  # After pitch
+        max(0, peak_frame - 12),   # Before pitch
+        peak_frame,                # Release peak
+        min(len(all_frames) - 1, peak_frame + 5),   # Mid trajectory
+        min(len(all_frames) - 1, peak_frame + 12)   # After pitch
     ]
 
     for i, idx in enumerate(frame_indices):
@@ -364,12 +397,12 @@ def save_debug_visualization(
         if i > 0:
             ax = axes[0, i]
         ax.imshow(all_frames[idx])
-        labels = ['Before', 'Pitch Start', 'Mid Pitch', 'After']
+        labels = ['Before', 'Release', 'Mid Flight', 'After']
         ax.set_title(f'{labels[i]} (frame {idx})')
         ax.axis('off')
 
     # Bottom row: processed frames
-    frame_show_indices = [0, 5, 10, 15]
+    frame_show_indices = [0, 7, 15, min(NUM_FRAMES - 1, 23)]
     for i, idx in enumerate(frame_show_indices):
         ax = axes[1, i]
         # Denormalize for display
