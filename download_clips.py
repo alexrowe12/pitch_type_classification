@@ -13,10 +13,11 @@ Usage:
 
 import argparse
 import json
-import os
 import subprocess
 import sys
+import threading
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 try:
@@ -29,9 +30,11 @@ except ImportError:
 
 # Paths
 DATA_JSON = "mlb-youtube-repo/data/mlb-youtube-segmented.json"
-CACHE_DIR = Path(".cache/videos")
 OUTPUT_DIR = Path("clips")
 ERROR_LOG = "download_errors.log"
+DEFAULT_WORKERS = 4
+
+ERROR_LOG_LOCK = threading.Lock()
 
 
 def check_dependencies():
@@ -135,14 +138,37 @@ def group_by_video(data: dict) -> dict:
     return dict(by_video)
 
 
-def download_clip(video_id: str, start: float, end: float, output_path: Path) -> bool:
+def has_completed_download(output_path: Path) -> bool:
+    """Return True if the output file looks like a completed download."""
+    return output_path.exists() and output_path.stat().st_size > 0
+
+
+def cleanup_partial_downloads(output_path: Path):
+    """Remove stale partial files left from interrupted downloads."""
+    partial_candidates = [
+        output_path.with_suffix(".partial.mp4"),
+        output_path.with_suffix(output_path.suffix + ".part"),
+        output_path.with_name(output_path.name + ".part"),
+    ]
+
+    for partial_path in partial_candidates:
+        if partial_path.exists():
+            partial_path.unlink()
+
+
+def download_clip(video_id: str, start: float, end: float, output_path: Path, timeout: int = 120) -> bool:
     """Download a specific clip segment directly from YouTube. Returns True on success."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    if output_path.exists():
+    if has_completed_download(output_path):
         return True
+    if output_path.exists():
+        output_path.unlink()
+
+    cleanup_partial_downloads(output_path)
 
     url = f"https://www.youtube.com/watch?v={video_id}"
+    temp_output_path = output_path.with_suffix(".partial.mp4")
 
     # yt-dlp --download-sections format: "*start-end"
     section = f"*{start}-{end}"
@@ -154,25 +180,31 @@ def download_clip(video_id: str, start: float, end: float, output_path: Path) ->
         "--force-keyframes-at-cuts",
         "--merge-output-format", "mp4",
         "--no-warnings",
-        "-o", str(output_path),
+        "-o", str(temp_output_path),
         url
     ]
 
     try:
-        result = subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=120)
-        return output_path.exists()
+        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=timeout)
+        if has_completed_download(temp_output_path):
+            temp_output_path.replace(output_path)
+            return True
+        return has_completed_download(output_path)
     except subprocess.TimeoutExpired:
         log_error(f"Timeout downloading {output_path.name}")
+        cleanup_partial_downloads(output_path)
         return False
     except subprocess.CalledProcessError as e:
         log_error(f"Failed to download {output_path.name}: {e.stderr}")
+        cleanup_partial_downloads(output_path)
         return False
 
 
 def log_error(message: str):
     """Append error message to log file."""
-    with open(ERROR_LOG, "a") as f:
-        f.write(message + "\n")
+    with ERROR_LOG_LOCK:
+        with open(ERROR_LOG, "a") as f:
+            f.write(message + "\n")
 
 
 def save_metadata(data: dict, output_dir: Path):
@@ -189,10 +221,66 @@ def save_metadata(data: dict, output_dir: Path):
             f.write(f"{clip_id},{pitch_type},{speed},{subset},{labels}\n")
 
 
+def build_download_jobs(data: dict) -> list[tuple[str, dict, Path]]:
+    """Build download jobs grouped by source video to improve request locality."""
+    jobs = []
+    for _, clips in sorted(group_by_video(data).items(), key=lambda item: item[0]):
+        for clip_id, clip in clips:
+            pitch_type = clip.get("type", "unknown")
+            output_path = OUTPUT_DIR / pitch_type / f"{clip_id}.mp4"
+            jobs.append((clip_id, clip, output_path))
+    return jobs
+
+
+def download_all_clips(jobs: list[tuple[str, dict, Path]], workers: int, timeout: int) -> tuple[int, int]:
+    """Download clips sequentially or in parallel."""
+    successful = 0
+    failed = 0
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(
+                download_clip,
+                clip["url"].split("=")[-1],
+                clip["start"],
+                clip["end"],
+                output_path,
+                timeout,
+            ): clip_id
+            for clip_id, clip, output_path in jobs
+        }
+
+        try:
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Downloading clips"):
+                if future.result():
+                    successful += 1
+                else:
+                    failed += 1
+        except KeyboardInterrupt:
+            print("\nInterrupted. Completed downloads were kept; in-flight partial files were not promoted.")
+            for future in futures:
+                future.cancel()
+            raise
+
+    return successful, failed
+
+
 def main():
     parser = argparse.ArgumentParser(description="Download MLB pitch video clips")
     parser.add_argument("--limit", type=int, help="Limit number of clips (for testing)")
     parser.add_argument("--types", nargs="+", help="Only download specific pitch types")
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=DEFAULT_WORKERS,
+        help=f"Number of concurrent downloads (default: {DEFAULT_WORKERS})",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=120,
+        help="Per-clip download timeout in seconds (default: 120)",
+    )
     args = parser.parse_args()
 
     # Check dependencies
@@ -226,21 +314,14 @@ def main():
     for ptype, count in sorted(type_counts.items(), key=lambda x: -x[1]):
         print(f"  {ptype}: {count}")
 
-    # Process each clip directly
-    print(f"\nDownloading {len(data)} clips directly from YouTube...")
+    jobs = build_download_jobs(data)
+    unique_videos = len(group_by_video(data))
 
-    successful = 0
-    failed = 0
+    # Process clips with bounded concurrency
+    print(f"\nDownloading {len(jobs)} clips from {unique_videos} source videos...")
+    print(f"Using {args.workers} concurrent download worker(s)")
 
-    for clip_id, clip in tqdm(data.items(), desc="Downloading clips"):
-        pitch_type = clip.get("type", "unknown")
-        video_id = clip["url"].split("=")[-1]
-        output_path = OUTPUT_DIR / pitch_type / f"{clip_id}.mp4"
-
-        if download_clip(video_id, clip["start"], clip["end"], output_path):
-            successful += 1
-        else:
-            failed += 1
+    successful, failed = download_all_clips(jobs, args.workers, args.timeout)
 
     # Save metadata
     save_metadata(data, OUTPUT_DIR)
