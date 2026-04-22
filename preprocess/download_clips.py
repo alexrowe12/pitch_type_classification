@@ -6,9 +6,9 @@ Downloads pitch video clips from YouTube and organizes them by pitch type.
 Uses yt-dlp to download specific segments directly (no full video downloads).
 
 Usage:
-    python download_clips.py --limit 100    # Test with 100 clips
-    python download_clips.py                 # Download all clips
-    python download_clips.py --types fastball slider  # Specific pitch types
+    python -m preprocess.download_clips --limit 100
+    python -m preprocess.download_clips
+    python -m preprocess.download_clips --types fastball slider
 """
 
 import argparse
@@ -21,6 +21,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 try:
+    from .paths import CLIPS_DIR, DOWNLOAD_ERROR_LOG, SEGMENTED_JSON
+except ImportError:
+    from paths import CLIPS_DIR, DOWNLOAD_ERROR_LOG, SEGMENTED_JSON
+
+try:
     from tqdm import tqdm
 except ImportError:
     print("Installing tqdm...")
@@ -28,10 +33,6 @@ except ImportError:
     from tqdm import tqdm
 
 
-# Paths
-DATA_JSON = "mlb-youtube-repo/data/mlb-youtube-segmented.json"
-OUTPUT_DIR = Path("clips")
-ERROR_LOG = "download_errors.log"
 DEFAULT_WORKERS = 8
 
 ERROR_LOG_LOCK = threading.Lock()
@@ -203,13 +204,15 @@ def download_clip(video_id: str, start: float, end: float, output_path: Path, ti
 def log_error(message: str):
     """Append error message to log file."""
     with ERROR_LOG_LOCK:
-        with open(ERROR_LOG, "a") as f:
+        DOWNLOAD_ERROR_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with open(DOWNLOAD_ERROR_LOG, "a") as f:
             f.write(message + "\n")
 
 
 def save_metadata(data: dict, output_dir: Path):
     """Save metadata CSV for all clips."""
     csv_path = output_dir / "metadata.csv"
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     with open(csv_path, "w") as f:
         f.write("clip_id,pitch_type,speed,subset,labels\n")
@@ -227,7 +230,7 @@ def build_download_jobs(data: dict) -> list[tuple[str, dict, Path]]:
     for _, clips in sorted(group_by_video(data).items(), key=lambda item: item[0]):
         for clip_id, clip in clips:
             pitch_type = clip.get("type", "unknown")
-            output_path = OUTPUT_DIR / pitch_type / f"{clip_id}.mp4"
+            output_path = CLIPS_DIR / pitch_type / f"{clip_id}.mp4"
             jobs.append((clip_id, clip, output_path))
     return jobs
 
@@ -288,7 +291,7 @@ def main():
 
     # Load dataset
     print("Loading dataset...")
-    data = load_dataset(DATA_JSON)
+    data = load_dataset(str(SEGMENTED_JSON))
     print(f"Total clips in dataset: {len(data)}")
 
     # Filter out bad data (unknown pitch types, negative timestamps)
@@ -324,16 +327,16 @@ def main():
     successful, failed = download_all_clips(jobs, args.workers, args.timeout)
 
     # Save metadata
-    save_metadata(data, OUTPUT_DIR)
+    save_metadata(data, CLIPS_DIR)
 
     # Summary
     print(f"\nComplete!")
     print(f"  Successful: {successful}")
     print(f"  Failed: {failed}")
-    print(f"  Output: {OUTPUT_DIR}/")
+    print(f"  Output: {CLIPS_DIR}/")
 
     if failed > 0:
-        print(f"  Errors logged to: {ERROR_LOG}")
+        print(f"  Errors logged to: {DOWNLOAD_ERROR_LOG}")
 
 
 if __name__ == "__main__":

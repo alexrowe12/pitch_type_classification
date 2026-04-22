@@ -1,9 +1,10 @@
 .claude
 .venv/
 .cache/
-clips/
-processed/
-debug/
 __pycache__/
 *.pyc
-download_errors.log
+.DS_Store
+data/clips/
+data/processed/
+data/debug/
+data/download_errors.log

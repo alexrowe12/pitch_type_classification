@@ -6,10 +6,10 @@ Finds the center-field broadcast segment, detects release and catch events,
 and extracts a compact pitch sequence for training/debugging.
 
 Usage:
-    python process_clips.py                  # Process all clips
-    python process_clips.py --preview        # Preview without saving
-    python process_clips.py --limit 10       # Process only N clips (for testing)
-    python process_clips.py --debug          # Save debug visualizations
+    python -m preprocess.process_clips
+    python -m preprocess.process_clips --preview
+    python -m preprocess.process_clips --limit 10
+    python -m preprocess.process_clips --debug
 """
 
 import argparse
@@ -21,11 +21,11 @@ import cv2
 import numpy as np
 from tqdm import tqdm
 
+try:
+    from .paths import CLIPS_DIR, DEBUG_DIR, PROCESSED_DIR, SEGMENTED_JSON
+except ImportError:
+    from paths import CLIPS_DIR, DEBUG_DIR, PROCESSED_DIR, SEGMENTED_JSON
 
-# Paths
-CLIPS_DIR = Path("clips")
-OUTPUT_DIR = Path("processed")
-METADATA_JSON = "mlb-youtube-repo/data/mlb-youtube-segmented.json"
 
 # Processing settings
 NUM_FRAMES = 6           # Frames to extract from release through catch
@@ -71,6 +71,9 @@ def load_metadata(json_path: str) -> dict:
 
 def get_clip_files() -> list[Path]:
     """Find all downloaded clip files."""
+    if not CLIPS_DIR.exists():
+        return []
+
     clips = []
     for pitch_type_dir in CLIPS_DIR.iterdir():
         if pitch_type_dir.is_dir() and pitch_type_dir.name not in ("metadata.csv",):
@@ -535,7 +538,7 @@ def process_clip(
         }
 
     # Save
-    out_path = OUTPUT_DIR / split / binary_label / f"{clip_id}.npy"
+    out_path = PROCESSED_DIR / split / binary_label / f"{clip_id}.npy"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     np.save(out_path, frames)
 
@@ -563,8 +566,7 @@ def save_debug_visualization(
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
 
-    debug_dir = Path("debug")
-    debug_dir.mkdir(exist_ok=True)
+    DEBUG_DIR.mkdir(parents=True, exist_ok=True)
 
     fig, axes = plt.subplots(4, 4, figsize=(18, 14))
 
@@ -663,13 +665,14 @@ def save_debug_visualization(
     )
 
     plt.tight_layout()
-    plt.savefig(debug_dir / f'{clip_id}_debug.png', dpi=100)
+    plt.savefig(DEBUG_DIR / f"{clip_id}_debug.png", dpi=100)
     plt.close()
 
 
 def save_processing_metadata(results: list[dict], output_dir: Path):
     """Save processing metadata to CSV."""
     csv_path = output_dir / "metadata.csv"
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     with open(csv_path, "w") as f:
         f.write("clip_id,original_type,binary_label,split,pitch_start,pitch_end\n")
@@ -699,7 +702,7 @@ def main():
 
     # Load metadata
     print("Loading metadata...")
-    metadata = load_metadata(METADATA_JSON)
+    metadata = load_metadata(str(SEGMENTED_JSON))
 
     # Find clips
     clips = get_clip_files()
@@ -752,11 +755,11 @@ def main():
         print(f"  Range: {min(starts)} - {max(starts)}")
 
         if not args.preview:
-            save_processing_metadata(results, OUTPUT_DIR)
-            print(f"\nOutput saved to: {OUTPUT_DIR}/")
+            save_processing_metadata(results, PROCESSED_DIR)
+            print(f"\nOutput saved to: {PROCESSED_DIR}/")
 
         if args.debug:
-            print(f"Debug visualizations saved to: debug/")
+            print(f"Debug visualizations saved to: {DEBUG_DIR}/")
 
 
 if __name__ == "__main__":
