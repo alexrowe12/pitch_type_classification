@@ -10,6 +10,8 @@ python -m preprocess.download_clips --limit 100
 python -m preprocess.process_clips --preview --debug --limit 20
 python -m stage_a.export_frames --limit 25
 python -m stage_a.build_weak_labels
+python -m stage_a.make_review_queue --target-size 250
+streamlit run stage_a/app.py
 ```
 
 Directory layout:
