@@ -15,4 +15,5 @@ Directory layout:
 - `data/clips/`: downloaded raw pitch clips
 - `data/processed/`: processed numpy arrays
 - `data/debug/`: debug visualizations
+- `data/stage_a/`: Stage A shot-classification artifacts
 - `research/mlb-youtube-repo/`: source dataset repo and metadata

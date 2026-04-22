@@ -8,3 +8,9 @@ data/clips/
 data/processed/
 data/debug/
 data/download_errors.log
+data/stage_a/frames/
+data/stage_a/embeddings/
+data/stage_a/models/
+data/stage_a/predictions/
+data/stage_a/review/
+data/stage_a/debug/
