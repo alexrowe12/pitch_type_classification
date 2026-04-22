@@ -18,6 +18,11 @@ MANUAL_LABELS_CSV = LABELS_DIR / "manual_labels.csv"
 TRAIN_LABELS_CSV = LABELS_DIR / "train_labels.csv"
 REVIEW_QUEUE_CSV = REVIEW_DIR / "review_queue.csv"
 
+STAGE_A_MODEL_PT = MODELS_DIR / "stage_a_model.pt"
+STAGE_A_METRICS_JSON = MODELS_DIR / "stage_a_metrics.json"
+FRAME_PREDICTIONS_CSV = PREDICTIONS_DIR / "frame_predictions.csv"
+CLIP_SEGMENTS_CSV = PREDICTIONS_DIR / "clip_segments.csv"
+
 ALL_STAGE_A_DIRS = [
     STAGE_A_DIR,
     FRAMES_DIR,
