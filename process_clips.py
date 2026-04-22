@@ -39,6 +39,8 @@ SEARCH_START_RATIO = 0.18
 SEARCH_END_RATIO = 0.90
 RELEASE_THRESHOLD_STD = 1.0
 CATCH_THRESHOLD_STD = 0.9
+RELEASE_FORWARD_OFFSET = 3
+MAX_RELEASE_FORWARD_SEARCH = 5
 MIN_RELEASE_TO_CATCH_GAP = 5
 MAX_RELEASE_TO_CATCH_GAP = 18
 MIN_PLATE_PEAK = 0.35
@@ -249,9 +251,24 @@ def score_segment_event(
     release_candidates = find_local_peaks(pitcher_motion, search_start, search_end, RELEASE_THRESHOLD_STD)
 
     if release_candidates:
-        release_local = release_candidates[0]
+        release_anchor = release_candidates[0]
     else:
-        release_local = search_start + int(np.argmax(pitcher_motion[search_start:search_end]))
+        release_anchor = search_start + int(np.argmax(pitcher_motion[search_start:search_end]))
+
+    # The pitcher ROI usually spikes slightly before actual ball release.
+    # Push the anchor a few frames later and prefer the first rising lane-motion
+    # point, which better matches ball flight beginning.
+    release_local = min(len(pitcher_motion) - 1, release_anchor + RELEASE_FORWARD_OFFSET)
+    release_search_end = min(len(lane_motion) - 1, release_anchor + MAX_RELEASE_FORWARD_SEARCH)
+    if release_search_end > release_anchor:
+        lane_slice = lane_motion[release_anchor:release_search_end + 1]
+        lane_deltas = np.diff(lane_slice)
+        positive_steps = np.where(lane_deltas > 0)[0]
+        if len(positive_steps) > 0:
+            release_local = min(
+                len(pitcher_motion) - 1,
+                release_anchor + int(positive_steps[0]) + 1,
+            )
 
     catch_start = min(len(plate_motion) - 1, release_local + MIN_RELEASE_TO_CATCH_GAP)
     catch_end = min(len(plate_motion) - 1, release_local + MAX_RELEASE_TO_CATCH_GAP)
@@ -304,6 +321,7 @@ def score_segment_event(
         "plate_motion": plate_motion,
         "lane_motion": lane_motion,
         "release_local": int(release_local),
+        "release_anchor": int(release_anchor),
         "catch_local": int(catch_local),
         "event_score": float(event_score),
         "pitcher_peak": pitcher_peak,
