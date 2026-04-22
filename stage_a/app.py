@@ -71,23 +71,47 @@ def save_manual_label(row: dict, assigned_label: str) -> None:
         )
 
 
-def build_context_paths(frame_path: Path) -> list[Path]:
-    """Return nearby frame paths from the same clip directory for context."""
+def remove_last_manual_label() -> bool:
+    """Remove the most recently appended manual label row."""
+    rows = load_manual_labels()
+    if not rows:
+        return False
+
+    rows = rows[:-1]
+    fieldnames = [
+        "clip_id",
+        "frame_idx",
+        "frame_path",
+        "pitch_type",
+        "weak_label",
+        "weak_confidence",
+        "queue_reason",
+        "assigned_label",
+        "labeled_at_utc",
+    ]
+    with open(MANUAL_LABELS_CSV, "w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    return True
+
+
+def build_context_paths(frame_path: Path) -> list[tuple[str, Path]]:
+    """Return nearby frame paths plus their role relative to the current frame."""
     clip_dir = frame_path.parent
-    current_name = frame_path.name
     frame_files = sorted(clip_dir.glob("frame_*.jpg"))
     if not frame_files:
-        return [frame_path]
+        return [("Current", frame_path)]
 
     try:
         idx = frame_files.index(frame_path)
     except ValueError:
-        return [frame_path]
+        return [("Current", frame_path)]
 
-    context = []
-    for neighbor in [idx - 1, idx, idx + 1]:
+    context: list[tuple[str, Path]] = []
+    for label, neighbor in [("Previous", idx - 1), ("Current", idx), ("Next", idx + 1)]:
         if 0 <= neighbor < len(frame_files):
-            context.append(frame_files[neighbor])
+            context.append((label, frame_files[neighbor]))
     return context
 
 
@@ -103,6 +127,7 @@ def get_next_item(queue_rows: list[dict], manual_rows: list[dict]) -> dict | Non
 def main() -> None:
     try:
         import streamlit as st
+        import streamlit.components.v1 as components
     except ImportError as exc:
         raise SystemExit(
             "Streamlit is not installed. Install it with `pip install streamlit`."
@@ -123,6 +148,23 @@ def main() -> None:
     labeled_count = len(manual_rows)
     st.caption(f"Labeled {labeled_count} of {len(queue_rows)} queued frames")
 
+    controls_top = st.columns([1, 1, 4])
+    undo_clicked = controls_top[0].button(
+        "Undo (Z)",
+        use_container_width=True,
+        disabled=labeled_count == 0,
+    )
+    if undo_clicked:
+        if remove_last_manual_label():
+            st.rerun()
+    controls_top[1].button(
+        "Refresh",
+        use_container_width=True,
+        disabled=True,
+        help="Keyboard shortcuts: P = Pitch Camera, Q = Non Pitch Camera, Z = Undo",
+    )
+    controls_top[2].caption("Shortcuts: `P` = Pitch Camera, `Q` = Non Pitch Camera, `Z` = Undo")
+
     if next_item is None:
         st.success("Review queue complete.")
         return
@@ -138,19 +180,57 @@ def main() -> None:
     meta_cols[3].metric("Queue Reason", next_item["queue_reason"])
 
     image_cols = st.columns(len(context_paths))
-    for col, path in zip(image_cols, context_paths):
+    for col, (role, path) in zip(image_cols, context_paths):
+        if role == "Current":
+            col.markdown("**Current frame to label**")
+        else:
+            col.markdown(f"**{role} context**")
         col.image(str(path), caption=path.name, use_container_width=True)
 
     action_cols = st.columns(3)
-    if action_cols[0].button("Pitch Camera", use_container_width=True):
+    if action_cols[0].button("Pitch Camera (P)", use_container_width=True):
         save_manual_label(next_item, "pitch_camera")
         st.rerun()
-    if action_cols[1].button("Non Pitch Camera", use_container_width=True):
+    if action_cols[1].button("Non Pitch Camera (Q)", use_container_width=True):
         save_manual_label(next_item, "non_pitch_camera")
         st.rerun()
     if action_cols[2].button("Skip", use_container_width=True):
         save_manual_label(next_item, "skip")
         st.rerun()
+
+    components.html(
+        """
+        <script>
+        const doc = window.parent.document;
+        if (!doc.__stageAHotkeysBound) {
+          doc.__stageAHotkeysBound = true;
+          doc.addEventListener("keydown", function(event) {
+            const activeTag = doc.activeElement ? doc.activeElement.tagName : "";
+            if (["INPUT", "TEXTAREA"].includes(activeTag)) {
+              return;
+            }
+            const key = event.key.toLowerCase();
+            const buttons = Array.from(doc.querySelectorAll("button"));
+            const clickByPrefix = (prefix) => {
+              const button = buttons.find(btn => btn.innerText.trim().startsWith(prefix));
+              if (button) {
+                event.preventDefault();
+                button.click();
+              }
+            };
+            if (key === "p") {
+              clickByPrefix("Pitch Camera");
+            } else if (key === "q") {
+              clickByPrefix("Non Pitch Camera");
+            } else if (key === "z") {
+              clickByPrefix("Undo");
+            }
+          });
+        }
+        </script>
+        """,
+        height=0,
+    )
 
 
 if __name__ == "__main__":
