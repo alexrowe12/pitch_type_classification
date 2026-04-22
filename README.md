@@ -9,6 +9,7 @@ Run preprocessing from the repo root:
 python -m preprocess.download_clips --limit 100
 python -m preprocess.process_clips --preview --debug --limit 20
 python -m stage_a.export_frames --limit 25
+python -m stage_a.build_weak_labels
 ```
 
 Directory layout:

@@ -15,3 +15,4 @@ data/stage_a/predictions/
 data/stage_a/review/
 data/stage_a/debug/
 data/stage_a/labels/frame_exports.csv
+data/stage_a/labels/weak_labels.csv
