@@ -9,7 +9,9 @@ Usage:
 
 import argparse
 import csv
+import os
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import cv2
@@ -22,6 +24,7 @@ from stage_b.paths import FRAME_EXPORTS_CSV, WEAK_EVENTS_CSV, ensure_stage_b_dir
 MIN_RELEASE_TO_CATCH_GAP = 8
 MAX_RELEASE_TO_CATCH_GAP = 42
 DEFAULT_SMOOTH_WINDOW = 5
+DEFAULT_WORKERS = min(8, os.cpu_count() or 1)
 
 
 def load_frame_exports(path: Path) -> list[dict]:
@@ -265,6 +268,12 @@ def main() -> None:
         default=DEFAULT_SMOOTH_WINDOW,
         help=f"Motion signal smoothing window (default: {DEFAULT_SMOOTH_WINDOW})",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=DEFAULT_WORKERS,
+        help=f"Number of clip analysis workers (default: {DEFAULT_WORKERS})",
+    )
     args = parser.parse_args()
 
     ensure_stage_b_dirs()
@@ -273,9 +282,19 @@ def main() -> None:
     if args.limit is not None:
         clip_ids = clip_ids[: args.limit]
 
+    print(f"Using workers={args.workers}")
+
+    def build_one(clip_id: str) -> dict:
+        return build_event_for_clip(grouped[clip_id], smooth_window=args.smooth_window)
+
     weak_rows = []
-    for clip_id in tqdm(clip_ids, desc="Building Stage B weak events"):
-        weak_rows.append(build_event_for_clip(grouped[clip_id], smooth_window=args.smooth_window))
+    with ThreadPoolExecutor(max_workers=max(1, args.workers)) as executor:
+        for row in tqdm(
+            executor.map(build_one, clip_ids),
+            total=len(clip_ids),
+            desc="Building Stage B weak events",
+        ):
+            weak_rows.append(row)
 
     write_weak_events(weak_rows)
     print(f"Wrote {len(weak_rows)} weak event row(s) to: {WEAK_EVENTS_CSV}")

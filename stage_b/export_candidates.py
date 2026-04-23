@@ -9,6 +9,8 @@ Usage:
 
 import argparse
 import csv
+import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import cv2
@@ -29,6 +31,7 @@ DEFAULT_CROP_LEFT = 0.15
 DEFAULT_CROP_TOP = 0.20
 DEFAULT_CROP_RIGHT = 0.90
 DEFAULT_CROP_BOTTOM = 0.92
+DEFAULT_WORKERS = min(8, os.cpu_count() or 1)
 
 
 def load_stage_a_segments(path: Path) -> list[dict]:
@@ -249,6 +252,12 @@ def main() -> None:
         default=DEFAULT_JPEG_QUALITY,
         help=f"JPEG quality for exported frames (default: {DEFAULT_JPEG_QUALITY})",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=DEFAULT_WORKERS,
+        help=f"Number of clip export workers (default: {DEFAULT_WORKERS})",
+    )
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing candidate frames")
     args = parser.parse_args()
 
@@ -265,11 +274,13 @@ def main() -> None:
 
     print(f"Found {len(segments)} strong Stage A segment(s) to export")
     print(f"Using stride={args.stride}, crop={crop_bounds}, size={args.image_width}x{args.image_height}")
+    print(f"Using workers={args.workers}")
 
     all_rows = []
     skipped: dict[str, int] = {}
-    for segment in tqdm(segments, desc="Exporting Stage B candidates"):
-        rows, skip_reason = export_segment_frames(
+
+    def export_one(segment: dict) -> tuple[list[dict], str | None]:
+        return export_segment_frames(
             segment=segment,
             stride=args.stride,
             crop_bounds=crop_bounds,
@@ -278,10 +289,17 @@ def main() -> None:
             jpeg_quality=args.jpeg_quality,
             overwrite=args.overwrite,
         )
-        if skip_reason is not None:
-            skipped[skip_reason] = skipped.get(skip_reason, 0) + 1
-            continue
-        all_rows.extend(rows)
+
+    with ThreadPoolExecutor(max_workers=max(1, args.workers)) as executor:
+        for rows, skip_reason in tqdm(
+            executor.map(export_one, segments),
+            total=len(segments),
+            desc="Exporting Stage B candidates",
+        ):
+            if skip_reason is not None:
+                skipped[skip_reason] = skipped.get(skip_reason, 0) + 1
+                continue
+            all_rows.extend(rows)
 
     write_frame_exports(all_rows)
     print(f"Exported {len(all_rows)} candidate frame(s)")

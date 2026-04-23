@@ -9,6 +9,8 @@ Usage:
 
 import argparse
 import csv
+import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import cv2
@@ -27,6 +29,7 @@ DEFAULT_CROP_RIGHT = 0.90
 DEFAULT_CROP_BOTTOM = 0.92
 OFFSPEED_TYPES = {"slider", "curveball", "changeup", "sinker", "knucklecurve"}
 SUBSET_TO_SPLIT = {"training": "train", "validation": "val", "testing": "test"}
+DEFAULT_WORKERS = min(8, os.cpu_count() or 1)
 
 
 def load_final_events(path: Path) -> list[dict]:
@@ -219,6 +222,12 @@ def main() -> None:
     parser.add_argument("--crop-top", type=float, default=DEFAULT_CROP_TOP, help="Normalized top crop bound")
     parser.add_argument("--crop-right", type=float, default=DEFAULT_CROP_RIGHT, help="Normalized right crop bound")
     parser.add_argument("--crop-bottom", type=float, default=DEFAULT_CROP_BOTTOM, help="Normalized bottom crop bound")
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=DEFAULT_WORKERS,
+        help=f"Number of clip export workers (default: {DEFAULT_WORKERS})",
+    )
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing exported sequences")
     args = parser.parse_args()
 
@@ -231,10 +240,12 @@ def main() -> None:
     metadata_by_clip = load_clip_metadata(CLIPS_DIR / "metadata.csv")
     print(f"Found {len(events)} final event(s) to export")
     print(f"Using num_frames={args.num_frames}, image_size={args.image_size}, crop={crop_bounds}")
+    print(f"Using workers={args.workers}")
 
     saved_rows = []
     skipped: dict[str, int] = {}
-    for event in tqdm(events, desc="Exporting Stage B sequences"):
+
+    def export_one(event: dict) -> tuple[dict, str | None, str | None]:
         save_path, error_reason = export_event_sequence(
             event=event,
             metadata_by_clip=metadata_by_clip,
@@ -243,19 +254,27 @@ def main() -> None:
             crop_bounds=crop_bounds,
             overwrite=args.overwrite,
         )
-        if error_reason is not None:
-            skipped[error_reason] = skipped.get(error_reason, 0) + 1
-            continue
+        return event, save_path, error_reason
 
-        metadata_row = metadata_by_clip[event["clip_id"]]
-        saved_rows.append(
-            {
-                "clip_id": event["clip_id"],
-                "split": SUBSET_TO_SPLIT[metadata_row["subset"]],
-                "label": binary_label(event["pitch_type"]),
-                "path": save_path,
-            }
-        )
+    with ThreadPoolExecutor(max_workers=max(1, args.workers)) as executor:
+        for event, save_path, error_reason in tqdm(
+            executor.map(export_one, events),
+            total=len(events),
+            desc="Exporting Stage B sequences",
+        ):
+            if error_reason is not None:
+                skipped[error_reason] = skipped.get(error_reason, 0) + 1
+                continue
+
+            metadata_row = metadata_by_clip[event["clip_id"]]
+            saved_rows.append(
+                {
+                    "clip_id": event["clip_id"],
+                    "split": SUBSET_TO_SPLIT[metadata_row["subset"]],
+                    "label": binary_label(event["pitch_type"]),
+                    "path": save_path,
+                }
+            )
 
     print(f"Exported {len(saved_rows)} sequence file(s) under: {SEQUENCES_DIR}")
     summarize(saved_rows, skipped)

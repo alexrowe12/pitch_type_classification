@@ -10,6 +10,8 @@ Usage:
 
 import argparse
 import csv
+import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import cv2
@@ -22,6 +24,7 @@ from stage_a.paths import FRAMES_DIR, LABELS_DIR, ensure_stage_a_dirs
 FRAME_EXPORTS_CSV = LABELS_DIR / "frame_exports.csv"
 DEFAULT_STRIDE = 12
 DEFAULT_JPEG_QUALITY = 90
+DEFAULT_WORKERS = min(8, os.cpu_count() or 1)
 
 
 def get_clip_files() -> list[Path]:
@@ -132,6 +135,12 @@ def main() -> None:
         default=DEFAULT_JPEG_QUALITY,
         help=f"JPEG quality for exported frames (default: {DEFAULT_JPEG_QUALITY})",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=DEFAULT_WORKERS,
+        help=f"Number of clip export workers (default: {DEFAULT_WORKERS})",
+    )
     args = parser.parse_args()
 
     ensure_stage_a_dirs()
@@ -142,16 +151,24 @@ def main() -> None:
 
     print(f"Found {len(clips)} clip(s) to export")
     print(f"Using stride={args.stride}")
+    print(f"Using workers={args.workers}")
 
-    all_rows = []
-    for clip_path in tqdm(clips, desc="Exporting Stage A frames"):
-        rows = export_clip_frames(
+    def export_one(clip_path: Path) -> list[dict]:
+        return export_clip_frames(
             clip_path=clip_path,
             stride=args.stride,
             overwrite=args.overwrite,
             jpeg_quality=args.jpeg_quality,
         )
-        all_rows.extend(rows)
+
+    all_rows = []
+    with ThreadPoolExecutor(max_workers=max(1, args.workers)) as executor:
+        for rows in tqdm(
+            executor.map(export_one, clips),
+            total=len(clips),
+            desc="Exporting Stage A frames",
+        ):
+            all_rows.extend(rows)
 
     write_frame_exports(all_rows)
     print(f"Exported {len(all_rows)} frame(s)")

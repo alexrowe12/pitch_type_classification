@@ -14,7 +14,9 @@ Usage:
 
 import argparse
 import json
+import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import cv2
@@ -46,6 +48,7 @@ MAX_RELEASE_TO_CATCH_GAP = 18
 MIN_PLATE_PEAK = 0.35
 MAX_ROI_CORRELATION = 0.88
 MIN_REGION_PEAK_SEPARATION = 0.75
+DEFAULT_WORKERS = min(8, os.cpu_count() or 1)
 
 # Pitch type mapping
 OFFSPEED_TYPES = {"slider", "curveball", "changeup", "sinker", "knucklecurve"}
@@ -689,6 +692,8 @@ def main():
                         help="Limit number of clips to process (for testing)")
     parser.add_argument("--debug", action="store_true",
                         help="Save debug visualizations")
+    parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS,
+                        help=f"Number of clip processing workers (default: {DEFAULT_WORKERS})")
     args = parser.parse_args()
 
     # Install matplotlib if debug mode and not installed
@@ -714,18 +719,21 @@ def main():
 
     if args.preview:
         print("\n** PREVIEW MODE - no files will be saved **\n")
+    print(f"Using workers={args.workers}")
 
     # Process clips
     results = []
     failed = 0
 
-    for clip_path in tqdm(clips, desc="Processing clips"):
-        result = process_clip(clip_path, metadata, args.preview, args.debug)
+    def process_one(clip_path: Path):
+        return process_clip(clip_path, metadata, args.preview, args.debug)
 
-        if result:
-            results.append(result)
-        else:
-            failed += 1
+    with ThreadPoolExecutor(max_workers=max(1, args.workers)) as executor:
+        for result in tqdm(executor.map(process_one, clips), total=len(clips), desc="Processing clips"):
+            if result:
+                results.append(result)
+            else:
+                failed += 1
 
     # Summary
     print(f"\nProcessing complete!")
