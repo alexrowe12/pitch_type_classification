@@ -212,7 +212,7 @@ def main() -> None:
     parser.add_argument(
         "--pitch-threshold",
         type=float,
-        default=0.95,
+        default=0.98,
         help="Probability threshold for drawing pitch-camera frames with green borders",
     )
     args = parser.parse_args()

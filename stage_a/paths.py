@@ -6,7 +6,6 @@ DATA_DIR = PROJECT_ROOT / "data"
 STAGE_A_DIR = DATA_DIR / "stage_a"
 
 FRAMES_DIR = STAGE_A_DIR / "frames"
-EMBEDDINGS_DIR = STAGE_A_DIR / "embeddings"
 LABELS_DIR = STAGE_A_DIR / "labels"
 MODELS_DIR = STAGE_A_DIR / "models"
 PREDICTIONS_DIR = STAGE_A_DIR / "predictions"
@@ -26,7 +25,6 @@ CLIP_SEGMENTS_CSV = PREDICTIONS_DIR / "clip_segments.csv"
 ALL_STAGE_A_DIRS = [
     STAGE_A_DIR,
     FRAMES_DIR,
-    EMBEDDINGS_DIR,
     LABELS_DIR,
     MODELS_DIR,
     PREDICTIONS_DIR,
