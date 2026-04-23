@@ -4,7 +4,7 @@ Run Stage A inference and produce clip-level pitch-camera segments.
 
 Usage:
     python -m stage_a.infer_stage_a
-    python -m stage_a.infer_stage_a --threshold 0.65
+    python -m stage_a.infer_stage_a --threshold 0.95
 """
 
 import argparse
@@ -234,7 +234,7 @@ def main() -> None:
     parser.add_argument(
         "--threshold",
         type=float,
-        default=0.65,
+        default=0.95,
         help="Probability threshold for selecting pitch-camera frames into segments",
     )
     parser.add_argument("--batch-size", type=int, default=64, help="Inference batch size")

@@ -13,7 +13,8 @@ python -m stage_a.build_weak_labels
 python -m stage_a.make_review_queue --target-size 250
 python -m stage_a.prepare_train_labels
 python -m stage_a.train_stage_a --epochs 3
-python -m stage_a.infer_stage_a
+python -m stage_a.infer_stage_a --threshold 0.95
+python -m stage_a.export_debug_contacts --limit 100
 streamlit run stage_a/app.py
 ```
 
