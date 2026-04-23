@@ -9,6 +9,7 @@ Usage:
 
 import argparse
 import csv
+import random
 from pathlib import Path
 
 from stage_a.paths import (
@@ -46,16 +47,20 @@ def merge_labels(
     weak_rows: list[dict],
     manual_rows: list[dict],
     min_weak_confidence: float,
+    max_positive_to_negative_ratio: float,
+    random_seed: int,
 ) -> list[dict]:
-    """Merge weak and manual labels into a clean training dataset."""
+    """Merge weak and manual labels into a clean, roughly balanced training dataset."""
     manual_lookup = build_manual_lookup(manual_rows)
-    merged = []
+    manual_merged = []
+    weak_non_pitch_rows = []
+    weak_pitch_rows = []
 
     for row in weak_rows:
         key = (row["clip_id"], row["frame_idx"])
         manual_row = manual_lookup.get(key)
         if manual_row is not None:
-            merged.append(
+            manual_merged.append(
                 {
                     "clip_id": row["clip_id"],
                     "frame_idx": row["frame_idx"],
@@ -75,18 +80,34 @@ def merge_labels(
         if weak_confidence < min_weak_confidence:
             continue
 
-        merged.append(
-            {
-                "clip_id": row["clip_id"],
-                "frame_idx": row["frame_idx"],
-                "frame_path": row["frame_path"],
-                "pitch_type": row["pitch_type"],
-                "label": weak_label,
-                "label_source": row.get("weak_source", "weak"),
-                "label_confidence": f"{weak_confidence:.4f}",
-            }
-        )
+        merged_row = {
+            "clip_id": row["clip_id"],
+            "frame_idx": row["frame_idx"],
+            "frame_path": row["frame_path"],
+            "pitch_type": row["pitch_type"],
+            "label": weak_label,
+            "label_source": row.get("weak_source", "weak"),
+            "label_confidence": f"{weak_confidence:.4f}",
+        }
+        if weak_label == "non_pitch_camera":
+            weak_non_pitch_rows.append(merged_row)
+        else:
+            weak_pitch_rows.append(merged_row)
 
+    negative_count = sum(1 for row in manual_merged if row["label"] == "non_pitch_camera")
+    negative_count += len(weak_non_pitch_rows)
+    manual_pitch_count = sum(1 for row in manual_merged if row["label"] == "pitch_camera")
+
+    if negative_count > 0 and max_positive_to_negative_ratio > 0:
+        max_total_pitch = int(negative_count * max_positive_to_negative_ratio)
+        weak_pitch_limit = max(0, max_total_pitch - manual_pitch_count)
+        rng = random.Random(random_seed)
+        if len(weak_pitch_rows) > weak_pitch_limit:
+            weak_pitch_rows = rng.sample(weak_pitch_rows, weak_pitch_limit)
+
+    merged = manual_merged + weak_non_pitch_rows + weak_pitch_rows
+    rng = random.Random(random_seed)
+    rng.shuffle(merged)
     return merged
 
 
@@ -121,6 +142,10 @@ def summarize(rows: list[dict]) -> None:
         print(f"  label={label}: {label_counts[label]}")
     for source in sorted(source_counts):
         print(f"  source={source}: {source_counts[source]}")
+    negative_count = label_counts.get("non_pitch_camera", 0)
+    positive_count = label_counts.get("pitch_camera", 0)
+    if negative_count:
+        print(f"  pitch_to_non_pitch_ratio: {positive_count / negative_count:.2f}:1")
 
 
 def main() -> None:
@@ -130,6 +155,18 @@ def main() -> None:
         type=float,
         default=0.80,
         help="Minimum weak-label confidence to include in training",
+    )
+    parser.add_argument(
+        "--max-positive-to-negative-ratio",
+        type=float,
+        default=4.0,
+        help="Maximum pitch_camera:non_pitch_camera ratio after merging labels",
+    )
+    parser.add_argument(
+        "--random-seed",
+        type=int,
+        default=42,
+        help="Random seed used when downsampling weak pitch-camera rows",
     )
     args = parser.parse_args()
 
@@ -145,6 +182,8 @@ def main() -> None:
         weak_rows=weak_rows,
         manual_rows=manual_rows,
         min_weak_confidence=args.min_weak_confidence,
+        max_positive_to_negative_ratio=args.max_positive_to_negative_ratio,
+        random_seed=args.random_seed,
     )
     write_train_labels(merged_rows)
 

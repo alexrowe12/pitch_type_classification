@@ -10,7 +10,10 @@ Usage:
 import argparse
 import csv
 import json
+import os
 from pathlib import Path
+
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
 import torch
 from PIL import Image
@@ -21,6 +24,7 @@ from torch.utils.data import DataLoader, Dataset
 from torchvision import models, transforms
 
 from stage_a.paths import STAGE_A_METRICS_JSON, STAGE_A_MODEL_PT, TRAIN_LABELS_CSV, ensure_stage_a_dirs
+from stage_a.torch_utils import select_device, should_pin_memory
 
 
 LABEL_TO_INDEX = {"non_pitch_camera": 0, "pitch_camera": 1}
@@ -166,6 +170,18 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=32, help="Training batch size")
     parser.add_argument("--learning-rate", type=float, default=1e-4, help="Optimizer learning rate")
     parser.add_argument("--val-ratio", type=float, default=0.2, help="Validation split ratio")
+    parser.add_argument(
+        "--device",
+        choices=["auto", "mps", "cuda", "cpu"],
+        default="auto",
+        help="Device to use. Defaults to auto, preferring Apple MPS, then CUDA, then CPU.",
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=0,
+        help="DataLoader worker count. Keep 0 on macOS unless image loading becomes the bottleneck.",
+    )
     args = parser.parse_args()
 
     ensure_stage_a_dirs()
@@ -186,11 +202,25 @@ def main() -> None:
     train_dataset = StageADataset(train_rows, transform=build_transforms(train=True))
     val_dataset = StageADataset(val_rows, transform=build_transforms(train=False))
 
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
+    device = select_device(args.device)
+    pin_memory = should_pin_memory(device)
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=args.num_workers,
+        pin_memory=pin_memory,
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=pin_memory,
+    )
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = build_model().to(device)
+    print(f"Using device: {device}")
 
     label_counts = {label: sum(1 for row in train_rows if row["label"] == label) for label in LABEL_TO_INDEX}
     total_train = sum(label_counts.values())

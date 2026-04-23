@@ -9,11 +9,16 @@ Usage:
 
 import argparse
 import csv
+import os
 from collections import defaultdict
 from pathlib import Path
 
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+
 import torch
 from PIL import Image
+from torch.utils.data import DataLoader, Dataset
+from tqdm import tqdm
 from torchvision import models, transforms
 
 from stage_a.paths import (
@@ -23,6 +28,7 @@ from stage_a.paths import (
     LABELS_DIR,
     ensure_stage_a_dirs,
 )
+from stage_a.torch_utils import select_device, should_pin_memory
 
 
 LABEL_TO_INDEX = {"non_pitch_camera": 0, "pitch_camera": 1}
@@ -57,31 +63,58 @@ def build_transform():
     )
 
 
-def predict_rows(rows: list[dict], model: torch.nn.Module, device: torch.device) -> list[dict]:
-    """Run per-frame inference for all rows."""
-    transform = build_transform()
-    predictions = []
+class StageAInferenceDataset(Dataset):
+    """Image dataset for running Stage A inference."""
+
+    def __init__(self, rows: list[dict], transform):
+        self.rows = rows
+        self.transform = transform
+
+    def __len__(self) -> int:
+        return len(self.rows)
+
+    def __getitem__(self, index: int):
+        row = self.rows[index]
+        image = Image.open(row["frame_path"]).convert("RGB")
+        return self.transform(image), index
+
+
+def predict_rows(
+    rows: list[dict],
+    model: torch.nn.Module,
+    device: torch.device,
+    batch_size: int,
+    num_workers: int,
+) -> list[dict]:
+    """Run batched per-frame inference for all rows."""
+    dataset = StageAInferenceDataset(rows, build_transform())
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=should_pin_memory(device),
+    )
+    predictions_by_index: dict[int, dict] = {}
 
     model.eval()
     with torch.no_grad():
-        for row in rows:
-            image = Image.open(row["frame_path"]).convert("RGB")
-            tensor = transform(image).unsqueeze(0).to(device)
-            logits = model(tensor)
-            probs = torch.softmax(logits, dim=1).cpu().squeeze(0)
-            pitch_prob = float(probs[LABEL_TO_INDEX["pitch_camera"]])
+        for images, indices in tqdm(loader, desc="Running Stage A inference"):
+            images = images.to(device)
+            logits = model(images)
+            probs = torch.softmax(logits, dim=1).cpu()
 
-            predictions.append(
-                {
+            for row_index, row_probs in zip(indices.tolist(), probs):
+                row = rows[row_index]
+                predictions_by_index[row_index] = {
                     "clip_id": row["clip_id"],
                     "frame_idx": int(row["frame_idx"]),
                     "frame_path": row["frame_path"],
                     "pitch_type": row["pitch_type"],
-                    "pitch_camera_probability": pitch_prob,
+                    "pitch_camera_probability": float(row_probs[LABEL_TO_INDEX["pitch_camera"]]),
                 }
-            )
 
-    return predictions
+    return [predictions_by_index[index] for index in range(len(rows))]
 
 
 def smooth_probabilities(values: list[float], window_size: int = 3) -> list[float]:
@@ -204,6 +237,19 @@ def main() -> None:
         default=0.65,
         help="Probability threshold for selecting pitch-camera frames into segments",
     )
+    parser.add_argument("--batch-size", type=int, default=64, help="Inference batch size")
+    parser.add_argument(
+        "--device",
+        choices=["auto", "mps", "cuda", "cpu"],
+        default="auto",
+        help="Device to use. Defaults to auto, preferring Apple MPS, then CUDA, then CPU.",
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=0,
+        help="DataLoader worker count. Keep 0 on macOS unless image loading becomes the bottleneck.",
+    )
     args = parser.parse_args()
 
     ensure_stage_a_dirs()
@@ -213,13 +259,21 @@ def main() -> None:
         )
 
     rows = load_export_rows(FRAME_EXPORTS_CSV)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = select_device(args.device)
 
-    model = build_model().to(device)
-    state_dict = torch.load(STAGE_A_MODEL_PT, map_location=device)
+    model = build_model()
+    state_dict = torch.load(STAGE_A_MODEL_PT, map_location="cpu")
     model.load_state_dict(state_dict)
+    model = model.to(device)
+    print(f"Using device: {device}")
 
-    frame_predictions = predict_rows(rows, model, device)
+    frame_predictions = predict_rows(
+        rows=rows,
+        model=model,
+        device=device,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+    )
     write_frame_predictions(frame_predictions)
 
     by_clip: dict[str, list[dict]] = defaultdict(list)
