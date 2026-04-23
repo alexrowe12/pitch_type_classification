@@ -24,6 +24,17 @@ python -m stage_a.infer_stage_a
 python -m stage_a.export_debug_contacts --limit 100
 ```
 
+Stage B release/catch localization:
+
+```bash
+python -m stage_b.export_candidates --min-stage-a-prob 0.98
+python -m stage_b.build_weak_events
+streamlit run stage_b/app.py
+python -m stage_b.prepare_events
+python -m stage_b.export_sequences --num-frames 12
+python -m stage_b.export_debug_contacts --limit 100
+```
+
 Legacy baseline preprocessing:
 
 ```bash
@@ -35,8 +46,10 @@ Directory layout:
 - `data/clips/`: downloaded raw pitch clips
 - `data/stage_a/labels/manual_labels.csv`: tracked manual Stage A labels
 - `data/stage_a/`: generated Stage A frames, models, predictions, and debug contact sheets
+- `data/stage_b/`: generated Stage B candidate frames, event labels, sequences, and debug outputs
 - `preprocess/`: raw clip download and legacy frame-processing scripts
 - `stage_a/`: Stage A shot-classification scripts
+- `stage_b/`: Stage B release/catch localization scripts
 - `research/mlb-youtube-repo/`: source dataset repo and metadata
 
 Generated artifacts under `data/` are ignored unless explicitly tracked.
