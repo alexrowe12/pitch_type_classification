@@ -224,38 +224,40 @@ def inject_hotkeys() -> None:
               return;
             }
             const key = event.key.toLowerCase();
+            const code = event.code;
             const buttons = Array.from(doc.querySelectorAll("button"));
-            const clickByText = (text) => {
-              const button = buttons.find(btn => btn.innerText.trim() === text);
+            const clickByPrefix = (prefix) => {
+              const button = buttons.find(btn => btn.innerText.trim().startsWith(prefix));
               if (button) {
                 event.preventDefault();
+                event.stopPropagation();
                 button.click();
               }
             };
             if (key === "a") {
-              clickByText("Release -1 (A)");
+              clickByPrefix("Release -1");
             } else if (key === "d") {
-              clickByText("Release +1 (D)");
+              clickByPrefix("Release +1");
             } else if (key === "j") {
-              clickByText("Catch -1 (J)");
+              clickByPrefix("Catch -1");
             } else if (key === "l") {
-              clickByText("Catch +1 (L)");
-            } else if (key === "enter") {
-              clickByText("Save Usable (Enter)");
+              clickByPrefix("Catch +1");
+            } else if (key === "enter" || code === "Enter" || code === "NumpadEnter") {
+              clickByPrefix("Save Usable");
             } else if (key === "u") {
-              clickByText("Mark Unusable (U)");
+              clickByPrefix("Mark Unusable");
             } else if (key === "z") {
-              clickByText("Undo (Z)");
+              clickByPrefix("Undo");
             } else if (key === "s") {
-              clickByText("Release -Jump (S)");
+              clickByPrefix("Release -Jump");
             } else if (key === "f") {
-              clickByText("Release +Jump (F)");
+              clickByPrefix("Release +Jump");
             } else if (key === "k") {
-              clickByText("Catch -Jump (K)");
+              clickByPrefix("Catch -Jump");
             } else if (key === ";") {
-              clickByText("Catch +Jump (;)");
+              clickByPrefix("Catch +Jump");
             }
-          });
+          }, true);
         }
         </script>
         """
