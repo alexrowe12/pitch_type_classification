@@ -210,9 +210,9 @@ def ensure_state_for_clip(clip_id: str, clip_rows: list[dict], weak_event: dict 
 
 def inject_hotkeys() -> None:
     """Inject keyboard shortcuts for the app controls."""
-    import streamlit.components.v1 as components
+    import streamlit as st
 
-    components.html(
+    st.html(
         """
         <script>
         const doc = window.parent.document;
@@ -258,8 +258,7 @@ def inject_hotkeys() -> None:
           });
         }
         </script>
-        """,
-        height=0,
+        """
     )
 
 
@@ -286,7 +285,7 @@ def main() -> None:
     next_clip_id = get_next_clip_id(clip_ids, manual_rows)
 
     top_cols = st.columns([1, 1, 4])
-    if top_cols[0].button("Undo (Z)", use_container_width=True, disabled=not manual_rows):
+    if top_cols[0].button("Undo (Z)", width="stretch", disabled=not manual_rows):
         if remove_last_manual_event():
             st.rerun()
     top_cols[1].metric("Labeled", f"{len({row['clip_id'] for row in manual_rows})}/{len(clip_ids)}")
@@ -338,36 +337,36 @@ def main() -> None:
     )
 
     control_cols = st.columns(8)
-    if control_cols[0].button("Release -1 (A)", use_container_width=True):
+    if control_cols[0].button("Release -1 (A)", width="stretch"):
         st.session_state.release_frame_idx = move_frame(frame_indices, st.session_state.release_frame_idx, -1)
         st.rerun()
-    if control_cols[1].button("Release +1 (D)", use_container_width=True):
+    if control_cols[1].button("Release +1 (D)", width="stretch"):
         st.session_state.release_frame_idx = move_frame(frame_indices, st.session_state.release_frame_idx, 1)
         st.rerun()
-    if control_cols[2].button("Release -Jump (S)", use_container_width=True):
+    if control_cols[2].button("Release -Jump (S)", width="stretch"):
         st.session_state.release_frame_idx = move_frame(frame_indices, st.session_state.release_frame_idx, -jump_size)
         st.rerun()
-    if control_cols[3].button("Release +Jump (F)", use_container_width=True):
+    if control_cols[3].button("Release +Jump (F)", width="stretch"):
         st.session_state.release_frame_idx = move_frame(frame_indices, st.session_state.release_frame_idx, jump_size)
         st.rerun()
-    if control_cols[4].button("Catch -1 (J)", use_container_width=True):
+    if control_cols[4].button("Catch -1 (J)", width="stretch"):
         st.session_state.catch_frame_idx = move_frame(frame_indices, st.session_state.catch_frame_idx, -1)
         st.rerun()
-    if control_cols[5].button("Catch +1 (L)", use_container_width=True):
+    if control_cols[5].button("Catch +1 (L)", width="stretch"):
         st.session_state.catch_frame_idx = move_frame(frame_indices, st.session_state.catch_frame_idx, 1)
         st.rerun()
-    if control_cols[6].button("Catch -Jump (K)", use_container_width=True):
+    if control_cols[6].button("Catch -Jump (K)", width="stretch"):
         st.session_state.catch_frame_idx = move_frame(frame_indices, st.session_state.catch_frame_idx, -jump_size)
         st.rerun()
-    if control_cols[7].button("Catch +Jump (;)", use_container_width=True):
+    if control_cols[7].button("Catch +Jump (;)", width="stretch"):
         st.session_state.catch_frame_idx = move_frame(frame_indices, st.session_state.catch_frame_idx, jump_size)
         st.rerun()
 
     utility_cols = st.columns(3)
-    if utility_cols[0].button("Set Catch = Release", use_container_width=True):
+    if utility_cols[0].button("Set Catch = Release", width="stretch"):
         st.session_state.catch_frame_idx = st.session_state.release_frame_idx
         st.rerun()
-    if utility_cols[1].button("Reset Weak", use_container_width=True):
+    if utility_cols[1].button("Reset Weak", width="stretch"):
         st.session_state.stage_b_clip_id = None
         st.rerun()
     utility_cols[2].caption(f"Selected window: {st.session_state.release_frame_idx} -> {st.session_state.catch_frame_idx}")
@@ -388,7 +387,7 @@ def main() -> None:
             frame_idx = row["frame_idx"]
             title = f"**{label}**" if frame_idx == target_frame else "&nbsp;"
             col.markdown(title)
-            col.image(row["frame_path"], caption=f"{frame_idx}", use_container_width=True)
+            col.image(row["frame_path"], caption=f"{frame_idx}", width="stretch")
 
     display_rows = sample_display_rows(
         clip_rows,
@@ -409,17 +408,17 @@ def main() -> None:
             col.markdown("sequence")
         else:
             col.markdown("&nbsp;")
-        col.image(row["frame_path"], caption=f"frame {frame_idx}", use_container_width=True)
+        col.image(row["frame_path"], caption=f"frame {frame_idx}", width="stretch")
         pick_cols = col.columns(2)
-        if pick_cols[0].button("Set R", key=f"{button_key_prefix}_r", use_container_width=True):
+        if pick_cols[0].button("Set R", key=f"{button_key_prefix}_r", width="stretch"):
             st.session_state.release_frame_idx = frame_idx
             st.rerun()
-        if pick_cols[1].button("Set C", key=f"{button_key_prefix}_c", use_container_width=True):
+        if pick_cols[1].button("Set C", key=f"{button_key_prefix}_c", width="stretch"):
             st.session_state.catch_frame_idx = frame_idx
             st.rerun()
 
     save_cols = st.columns(2)
-    if save_cols[0].button("Save Usable (Enter)", use_container_width=True):
+    if save_cols[0].button("Save Usable (Enter)", width="stretch"):
         save_manual_event(
             clip_rows=clip_rows,
             weak_event=weak_event,
@@ -429,7 +428,7 @@ def main() -> None:
             notes=notes,
         )
         st.rerun()
-    if save_cols[1].button("Mark Unusable (U)", use_container_width=True):
+    if save_cols[1].button("Mark Unusable (U)", width="stretch"):
         save_manual_event(
             clip_rows=clip_rows,
             weak_event=weak_event,

@@ -127,7 +127,6 @@ def get_next_item(queue_rows: list[dict], manual_rows: list[dict]) -> dict | Non
 def main() -> None:
     try:
         import streamlit as st
-        import streamlit.components.v1 as components
     except ImportError as exc:
         raise SystemExit(
             "Streamlit is not installed. Install it with `pip install streamlit`."
@@ -151,7 +150,7 @@ def main() -> None:
     controls_top = st.columns([1, 1, 4])
     undo_clicked = controls_top[0].button(
         "Undo (Z)",
-        use_container_width=True,
+        width="stretch",
         disabled=labeled_count == 0,
     )
     if undo_clicked:
@@ -159,7 +158,7 @@ def main() -> None:
             st.rerun()
     controls_top[1].button(
         "Refresh",
-        use_container_width=True,
+        width="stretch",
         disabled=True,
         help="Keyboard shortcuts: P = Pitch Camera, Q = Non Pitch Camera, Z = Undo",
     )
@@ -185,20 +184,20 @@ def main() -> None:
             col.markdown("**Current frame to label**")
         else:
             col.markdown(f"**{role} context**")
-        col.image(str(path), caption=path.name, use_container_width=True)
+        col.image(str(path), caption=path.name, width="stretch")
 
     action_cols = st.columns(3)
-    if action_cols[0].button("Pitch Camera (P)", use_container_width=True):
+    if action_cols[0].button("Pitch Camera (P)", width="stretch"):
         save_manual_label(next_item, "pitch_camera")
         st.rerun()
-    if action_cols[1].button("Non Pitch Camera (Q)", use_container_width=True):
+    if action_cols[1].button("Non Pitch Camera (Q)", width="stretch"):
         save_manual_label(next_item, "non_pitch_camera")
         st.rerun()
-    if action_cols[2].button("Skip", use_container_width=True):
+    if action_cols[2].button("Skip", width="stretch"):
         save_manual_label(next_item, "skip")
         st.rerun()
 
-    components.html(
+    st.html(
         """
         <script>
         const doc = window.parent.document;
@@ -228,8 +227,7 @@ def main() -> None:
           });
         }
         </script>
-        """,
-        height=0,
+        """
     )
 
 
