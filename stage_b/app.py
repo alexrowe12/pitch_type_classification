@@ -143,6 +143,15 @@ def move_frame(frame_indices: list[int], current: int, delta: int) -> int:
     return frame_indices[next_index]
 
 
+def clamp_event_order(frame_indices: list[int], release_frame_idx: int, catch_frame_idx: int) -> tuple[int, int]:
+    """Keep release at or before catch using available exported frames."""
+    release_frame_idx = nearest_available_frame(frame_indices, release_frame_idx)
+    catch_frame_idx = nearest_available_frame(frame_indices, catch_frame_idx)
+    if release_frame_idx > catch_frame_idx:
+        catch_frame_idx = release_frame_idx
+    return release_frame_idx, catch_frame_idx
+
+
 def sample_display_rows(rows: list[dict], release_frame_idx: int, catch_frame_idx: int, max_frames: int) -> list[dict]:
     """Sample rows for display while forcing release/catch rows to be visible."""
     if len(rows) <= max_frames:
@@ -162,6 +171,16 @@ def sample_display_rows(rows: list[dict], release_frame_idx: int, catch_frame_id
         selected_indices.add(rows.index(frame_to_row[frame_idx]))
 
     return [rows[index] for index in sorted(selected_indices)]
+
+
+def local_rows(rows: list[dict], center_frame_idx: int, radius: int = 4) -> list[dict]:
+    """Return a small local window of rows around one frame."""
+    frame_indices = [row["frame_idx"] for row in rows]
+    center_frame_idx = nearest_available_frame(frame_indices, center_frame_idx)
+    center_index = frame_indices.index(center_frame_idx)
+    start = max(0, center_index - radius)
+    end = min(len(rows), center_index + radius + 1)
+    return rows[start:end]
 
 
 def ensure_state_for_clip(clip_id: str, clip_rows: list[dict], weak_event: dict | None) -> None:
@@ -186,6 +205,7 @@ def ensure_state_for_clip(clip_id: str, clip_rows: list[dict], weak_event: dict 
     st.session_state.release_frame_idx = release
     st.session_state.catch_frame_idx = catch
     st.session_state.notes = ""
+    st.session_state.jump_size = 5
 
 
 def inject_hotkeys() -> None:
@@ -226,6 +246,14 @@ def inject_hotkeys() -> None:
               clickByText("Mark Unusable (U)");
             } else if (key === "z") {
               clickByText("Undo (Z)");
+            } else if (key === "s") {
+              clickByText("Release -Jump (S)");
+            } else if (key === "f") {
+              clickByText("Release +Jump (F)");
+            } else if (key === "k") {
+              clickByText("Catch -Jump (K)");
+            } else if (key === ";") {
+              clickByText("Catch +Jump (;)");
             }
           });
         }
@@ -244,7 +272,7 @@ def main() -> None:
     ensure_stage_b_dirs()
     st.set_page_config(page_title="Stage B Release/Catch Review", layout="wide")
     st.title("Stage B Review")
-    st.caption("Shortcuts: A/D release, J/L catch, Enter save usable, U unusable, Z undo")
+    st.caption("Shortcuts: A/D release, J/L catch, S/F release jump, K/; catch jump, Enter save usable, U unusable, Z undo")
 
     frame_rows = load_csv_rows(FRAME_EXPORTS_CSV)
     if not frame_rows:
@@ -285,24 +313,82 @@ def main() -> None:
             f"catch={weak_event['catch_frame_idx']}, reason={weak_event['reason']}"
         )
 
-    control_cols = st.columns(6)
+    control_top = st.columns([1.2, 1.2, 1.2, 2.4])
+    jump_size = control_top[0].selectbox("Jump", [1, 3, 5, 10, 15], index=[1, 3, 5, 10, 15].index(st.session_state.get("jump_size", 5)))
+    st.session_state.jump_size = jump_size
+    release_frame_idx, catch_frame_idx = clamp_event_order(
+        frame_indices,
+        st.session_state.release_frame_idx,
+        st.session_state.catch_frame_idx,
+    )
+    st.session_state.release_frame_idx = control_top[1].select_slider(
+        "Release Frame",
+        options=frame_indices,
+        value=release_frame_idx,
+    )
+    st.session_state.catch_frame_idx = control_top[2].select_slider(
+        "Catch Frame",
+        options=frame_indices,
+        value=max(st.session_state.release_frame_idx, catch_frame_idx),
+    )
+    st.session_state.release_frame_idx, st.session_state.catch_frame_idx = clamp_event_order(
+        frame_indices,
+        st.session_state.release_frame_idx,
+        st.session_state.catch_frame_idx,
+    )
+
+    control_cols = st.columns(8)
     if control_cols[0].button("Release -1 (A)", use_container_width=True):
         st.session_state.release_frame_idx = move_frame(frame_indices, st.session_state.release_frame_idx, -1)
         st.rerun()
     if control_cols[1].button("Release +1 (D)", use_container_width=True):
         st.session_state.release_frame_idx = move_frame(frame_indices, st.session_state.release_frame_idx, 1)
         st.rerun()
-    if control_cols[2].button("Catch -1 (J)", use_container_width=True):
+    if control_cols[2].button("Release -Jump (S)", use_container_width=True):
+        st.session_state.release_frame_idx = move_frame(frame_indices, st.session_state.release_frame_idx, -jump_size)
+        st.rerun()
+    if control_cols[3].button("Release +Jump (F)", use_container_width=True):
+        st.session_state.release_frame_idx = move_frame(frame_indices, st.session_state.release_frame_idx, jump_size)
+        st.rerun()
+    if control_cols[4].button("Catch -1 (J)", use_container_width=True):
         st.session_state.catch_frame_idx = move_frame(frame_indices, st.session_state.catch_frame_idx, -1)
         st.rerun()
-    if control_cols[3].button("Catch +1 (L)", use_container_width=True):
+    if control_cols[5].button("Catch +1 (L)", use_container_width=True):
         st.session_state.catch_frame_idx = move_frame(frame_indices, st.session_state.catch_frame_idx, 1)
         st.rerun()
-    if control_cols[4].button("Reset Weak", use_container_width=True):
-        st.session_state.stage_b_clip_id = None
+    if control_cols[6].button("Catch -Jump (K)", use_container_width=True):
+        st.session_state.catch_frame_idx = move_frame(frame_indices, st.session_state.catch_frame_idx, -jump_size)
+        st.rerun()
+    if control_cols[7].button("Catch +Jump (;)", use_container_width=True):
+        st.session_state.catch_frame_idx = move_frame(frame_indices, st.session_state.catch_frame_idx, jump_size)
         st.rerun()
 
+    utility_cols = st.columns(3)
+    if utility_cols[0].button("Set Catch = Release", use_container_width=True):
+        st.session_state.catch_frame_idx = st.session_state.release_frame_idx
+        st.rerun()
+    if utility_cols[1].button("Reset Weak", use_container_width=True):
+        st.session_state.stage_b_clip_id = None
+        st.rerun()
+    utility_cols[2].caption(f"Selected window: {st.session_state.release_frame_idx} -> {st.session_state.catch_frame_idx}")
+
     notes = st.text_input("Notes", key="notes")
+
+    zoom_cols = st.columns(2)
+    zoom_cols[0].markdown("**Release Zoom**")
+    zoom_cols[1].markdown("**Catch Zoom**")
+    release_zoom = local_rows(clip_rows, st.session_state.release_frame_idx, radius=4)
+    catch_zoom = local_rows(clip_rows, st.session_state.catch_frame_idx, radius=4)
+    for container, zoom_rows, target_frame, label in [
+        (zoom_cols[0], release_zoom, st.session_state.release_frame_idx, "RELEASE"),
+        (zoom_cols[1], catch_zoom, st.session_state.catch_frame_idx, "CATCH"),
+    ]:
+        cols = container.columns(len(zoom_rows))
+        for col, row in zip(cols, zoom_rows):
+            frame_idx = row["frame_idx"]
+            title = f"**{label}**" if frame_idx == target_frame else "&nbsp;"
+            col.markdown(title)
+            col.image(row["frame_path"], caption=f"{frame_idx}", use_container_width=True)
 
     display_rows = sample_display_rows(
         clip_rows,
@@ -314,6 +400,7 @@ def main() -> None:
     for index, row in enumerate(display_rows):
         frame_idx = row["frame_idx"]
         col = cols[index % 6]
+        button_key_prefix = f"{next_clip_id}_{frame_idx}"
         if frame_idx == st.session_state.release_frame_idx:
             col.markdown("**RELEASE**")
         elif frame_idx == st.session_state.catch_frame_idx:
@@ -323,6 +410,13 @@ def main() -> None:
         else:
             col.markdown("&nbsp;")
         col.image(row["frame_path"], caption=f"frame {frame_idx}", use_container_width=True)
+        pick_cols = col.columns(2)
+        if pick_cols[0].button("Set R", key=f"{button_key_prefix}_r", use_container_width=True):
+            st.session_state.release_frame_idx = frame_idx
+            st.rerun()
+        if pick_cols[1].button("Set C", key=f"{button_key_prefix}_c", use_container_width=True):
+            st.session_state.catch_frame_idx = frame_idx
+            st.rerun()
 
     save_cols = st.columns(2)
     if save_cols[0].button("Save Usable (Enter)", use_container_width=True):
