@@ -76,7 +76,11 @@ def main() -> None:
         pin_memory=should_pin_memory(device),
     )
 
-    model = build_model(model_name, input_channels=input_channels).to(device)
+    model = build_model(
+        model_name,
+        input_channels=input_channels,
+        dropout=float(checkpoint.get("dropout", 0.35)),
+    ).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
     criterion = nn.CrossEntropyLoss()
     metrics = evaluate(model, loader, criterion, device)

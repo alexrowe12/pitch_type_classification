@@ -38,8 +38,8 @@ class Small3DCNN(nn.Module):
         return self.classifier(self.features(inputs))
 
 
-def build_model(model_name: str, input_channels: int) -> nn.Module:
+def build_model(model_name: str, input_channels: int, dropout: float = 0.35) -> nn.Module:
     """Build a model by name."""
     if model_name == "small_3d_cnn":
-        return Small3DCNN(input_channels=input_channels)
+        return Small3DCNN(input_channels=input_channels, dropout=dropout)
     raise ValueError(f"Unknown model: {model_name}")

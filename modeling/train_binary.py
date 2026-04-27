@@ -37,6 +37,14 @@ def make_run_id(variant: str, model_name: str) -> str:
     return f"{timestamp}_{variant}_{model_name}"
 
 
+def set_seed(seed: int) -> None:
+    """Set random seeds for repeatable small-data experiments."""
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
 def infer_input_channels(variant: str, variant_root: Path) -> int:
     """Read one sequence file to infer channel count."""
     rows = list_variant_rows(variant, "train", variant_root=variant_root)
@@ -216,6 +224,8 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE, help="Training batch size")
     parser.add_argument("--learning-rate", type=float, default=1e-4, help="Optimizer learning rate")
     parser.add_argument("--weight-decay", type=float, default=1e-4, help="Optimizer weight decay")
+    parser.add_argument("--dropout", type=float, default=0.35, help="Classifier dropout rate")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--overfit-samples", type=int, default=0, help="Use N train samples for overfit sanity check")
     parser.add_argument("--run-id", type=str, default=None, help="Optional run identifier")
     parser.add_argument(
@@ -228,6 +238,7 @@ def main() -> None:
     args = parser.parse_args()
 
     ensure_modeling_dirs()
+    set_seed(args.seed)
     datasets = load_datasets(args.variant, args.variant_root)
     if len(datasets["train"]) == 0 or len(datasets["val"]) == 0:
         raise ValueError("Training requires non-empty train and val datasets. Run variant export and val split first.")
@@ -238,7 +249,7 @@ def main() -> None:
     device = select_device(args.device)
     pin_memory = should_pin_memory(device)
     input_channels = infer_input_channels(args.variant, args.variant_root)
-    model = build_model(args.model, input_channels=input_channels).to(device)
+    model = build_model(args.model, input_channels=input_channels, dropout=args.dropout).to(device)
     weights = class_weights(train_dataset).to(device)
     criterion = nn.CrossEntropyLoss(weight=weights)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
@@ -303,6 +314,7 @@ def main() -> None:
                     "input_channels": input_channels,
                     "label_to_index": LABEL_TO_INDEX,
                     "args": vars(args),
+                    "dropout": args.dropout,
                 },
                 run_dir / "best_model.pt",
             )
@@ -312,6 +324,8 @@ def main() -> None:
         "variant": args.variant,
         "model": args.model,
         "input_channels": input_channels,
+        "dropout": args.dropout,
+        "seed": args.seed,
         "device": str(device),
         "train_samples": len(train_dataset),
         "val_samples": len(val_dataset),
