@@ -124,7 +124,7 @@ def draw_frame_row(
     return y + THUMB_SIZE[1] + LABEL_HEIGHT + ROW_GAP
 
 
-def render_contact_sheet(rgb_path: Path, variant_root: Path) -> Image.Image:
+def render_contact_sheet(rgb_path: Path, variant_root: Path, subtitle: str | None = None) -> Image.Image:
     """Render one variant debug sheet."""
     diff_path = variant_path_for(rgb_path, variant_root, "diff")
     if not diff_path.exists():
@@ -151,7 +151,8 @@ def render_contact_sheet(rgb_path: Path, variant_root: Path) -> Image.Image:
     small_font = load_font(12)
 
     draw_text(draw, (PADDING, PADDING), f"{clip_id} | {split} | {label}", title_font)
-    draw_text(draw, (PADDING, PADDING + 30), f"rgb={rgb.shape} diff={diff.shape}", label_font, fill=MUTED)
+    subtitle_text = subtitle or f"rgb={rgb.shape} diff={diff.shape}"
+    draw_text(draw, (PADDING, PADDING + 30), subtitle_text, label_font, fill=MUTED)
 
     rgb_images = [rgb_frame_to_image(frame) for frame in rgb]
     diff_images = [diff_frame_to_image(frame) for frame in diff]
