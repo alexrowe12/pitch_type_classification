@@ -33,6 +33,7 @@ TEXT = (238, 241, 245)
 MUTED = (161, 170, 181)
 CANDIDATE = (255, 194, 80)
 SELECTED = (255, 66, 54)
+ALT_PATHS = [(84, 160, 255), (118, 212, 125)]
 DIFF_COLOR = (210, 210, 210)
 
 
@@ -49,6 +50,18 @@ class Candidate:
     motion_score: float
     color_score: float
     score: float
+
+
+@dataclass(frozen=True)
+class RankedPath:
+    """A linked candidate path with trajectory-level scores."""
+
+    candidates: tuple[Candidate, ...]
+    score: float
+    displacement_x: float
+    displacement_y: float
+    average_area: float
+    smoothness: float
 
 
 def list_rgb_sequences(variant_root: Path, split: str | None, limit: int | None) -> list[Path]:
@@ -179,8 +192,11 @@ def transition_score(previous: Candidate, current: Candidate) -> float:
     return 0.25 - distance_penalty - backward_penalty - stationary_penalty - gap_penalty
 
 
-def link_candidates(candidates_by_frame: dict[int, list[Candidate]]) -> list[Candidate]:
-    """Link candidates into the best trajectory using dynamic programming."""
+def candidate_tracks(
+    candidates_by_frame: dict[int, list[Candidate]],
+    max_paths_per_candidate: int,
+) -> list[tuple[Candidate, ...]]:
+    """Generate multiple plausible linked tracks."""
     all_candidates = [
         candidate
         for frame_candidates in candidates_by_frame.values()
@@ -190,34 +206,113 @@ def link_candidates(candidates_by_frame: dict[int, list[Candidate]]) -> list[Can
         return []
 
     ordered = sorted(all_candidates, key=lambda candidate: (candidate.frame_index, candidate.x))
-    best_score: dict[Candidate, float] = {}
-    previous_node: dict[Candidate, Candidate | None] = {}
+    paths_by_end: dict[Candidate, list[tuple[float, tuple[Candidate, ...]]]] = {}
 
     for candidate in ordered:
-        best_score[candidate] = candidate.score
-        previous_node[candidate] = None
+        candidate_paths = [(candidate.score, (candidate,))]
         for previous in ordered:
             if previous.frame_index >= candidate.frame_index:
                 break
             transition = transition_score(previous, candidate)
             if transition < -100:
                 continue
-            candidate_score = best_score[previous] + candidate.score + transition
-            if candidate_score > best_score[candidate]:
-                best_score[candidate] = candidate_score
-                previous_node[candidate] = previous
+            for previous_score, previous_path in paths_by_end.get(previous, []):
+                if candidate in previous_path:
+                    continue
+                candidate_paths.append((previous_score + candidate.score + transition, previous_path + (candidate,)))
 
-    end = max(ordered, key=lambda candidate: best_score[candidate])
-    path = []
-    current: Candidate | None = end
-    while current is not None:
-        path.append(current)
-        current = previous_node[current]
-    path.reverse()
+        candidate_paths.sort(key=lambda item: item[0], reverse=True)
+        paths_by_end[candidate] = candidate_paths[:max_paths_per_candidate]
 
-    if len(path) < 2:
-        return []
-    return path
+    tracks = []
+    seen = set()
+    for candidate_paths in paths_by_end.values():
+        for _score, path in candidate_paths:
+            if len(path) < 2:
+                continue
+            key = tuple((candidate.frame_index, round(candidate.x, 1), round(candidate.y, 1)) for candidate in path)
+            if key in seen:
+                continue
+            seen.add(key)
+            tracks.append(path)
+    return tracks
+
+
+def path_smoothness(path: tuple[Candidate, ...]) -> float:
+    """Return a smoothness score in 0..1 based on velocity consistency."""
+    if len(path) < 3:
+        return 0.35
+
+    velocities = []
+    for previous, current in zip(path, path[1:]):
+        gap = max(1, current.frame_index - previous.frame_index)
+        velocities.append(((current.x - previous.x) / gap, (current.y - previous.y) / gap))
+
+    changes = []
+    for previous_velocity, current_velocity in zip(velocities, velocities[1:]):
+        changes.append(float(np.hypot(current_velocity[0] - previous_velocity[0], current_velocity[1] - previous_velocity[1])))
+    if not changes:
+        return 0.35
+    return float(np.exp(-np.mean(changes) / 28.0))
+
+
+def rank_path(path: tuple[Candidate, ...], width: int, height: int) -> RankedPath:
+    """Score a complete path using ball-flight priors."""
+    start = path[0]
+    end = path[-1]
+    displacement_x = end.x - start.x
+    displacement_y = end.y - start.y
+    total_distance = float(np.hypot(displacement_x, displacement_y))
+    x_span = max(candidate.x for candidate in path) - min(candidate.x for candidate in path)
+    y_span = max(candidate.y for candidate in path) - min(candidate.y for candidate in path)
+    average_area = float(np.mean([candidate.area for candidate in path]))
+    average_candidate_score = float(np.mean([candidate.score for candidate in path]))
+    average_y = float(np.mean([candidate.y for candidate in path]))
+    smoothness = path_smoothness(path)
+    frame_coverage = len(path) / 12.0
+
+    horizontal_score = np.clip(x_span / (width * 0.28), 0.0, 1.0)
+    travel_score = np.clip(total_distance / (width * 0.35), 0.0, 1.0)
+    small_area_score = np.clip((18.0 - average_area) / 17.0, 0.0, 1.0)
+    mid_height_score = 1.0 - np.clip(abs((average_y / height) - 0.48) / 0.42, 0.0, 1.0)
+    vertical_stability = 1.0 - np.clip(y_span / (height * 0.40), 0.0, 1.0)
+    direction_score = 0.8 if displacement_x >= -4 else 0.25
+    body_stickiness_penalty = 0.30 if x_span < width * 0.08 else 0.0
+
+    score = (
+        average_candidate_score * 0.18
+        + horizontal_score * 0.25
+        + travel_score * 0.18
+        + small_area_score * 0.13
+        + smoothness * 0.10
+        + frame_coverage * 0.08
+        + mid_height_score * 0.05
+        + vertical_stability * 0.03
+        + direction_score * 0.04
+        - body_stickiness_penalty
+    )
+
+    return RankedPath(
+        candidates=path,
+        score=float(score),
+        displacement_x=float(displacement_x),
+        displacement_y=float(displacement_y),
+        average_area=average_area,
+        smoothness=smoothness,
+    )
+
+
+def rank_candidate_tracks(
+    candidates_by_frame: dict[int, list[Candidate]],
+    width: int,
+    height: int,
+    max_paths_per_candidate: int,
+) -> list[RankedPath]:
+    """Return ranked paths for review."""
+    tracks = candidate_tracks(candidates_by_frame, max_paths_per_candidate=max_paths_per_candidate)
+    ranked = [rank_path(track, width=width, height=height) for track in tracks]
+    ranked.sort(key=lambda item: item.score, reverse=True)
+    return ranked
 
 
 def frame_to_image(frame: np.ndarray) -> Image.Image:
@@ -259,13 +354,33 @@ def draw_candidates(
         )
 
 
+def draw_path(
+    draw: ImageDraw.ImageDraw,
+    path: tuple[Candidate, ...],
+    row_y: int,
+    cell_width: int,
+    source_size: int,
+    color: tuple[int, int, int],
+    width: int,
+) -> None:
+    """Draw a linked path over one row of thumbnails."""
+    if len(path) < 2:
+        return
+    points = []
+    for candidate in path:
+        x = PADDING + ROW_LABEL_WIDTH + candidate.frame_index * cell_width
+        cx, cy = scale_point(candidate, source_size)
+        points.append((x + cx, row_y + cy))
+    draw.line(points, fill=color, width=width)
+
+
 def render_sheet(
     rgb_path: Path,
     variant_root: Path,
     sequence: np.ndarray,
     diff: np.ndarray,
     candidates: dict[int, list[Candidate]],
-    path: list[Candidate],
+    ranked_paths: list[RankedPath],
 ) -> Image.Image:
     """Render one ball-track debug sheet."""
     relative = rgb_path.relative_to(variant_root / "rgb")
@@ -283,14 +398,23 @@ def render_sheet(
     title_font = load_font(22)
     label_font = load_font(13)
     small_font = load_font(11)
-    selected_by_frame = {candidate.frame_index: candidate for candidate in path}
+    selected_path = ranked_paths[0].candidates if ranked_paths else ()
+    alternate_paths = [ranked_path.candidates for ranked_path in ranked_paths[1:3]]
+    selected_by_frame = {candidate.frame_index: candidate for candidate in selected_path}
     candidate_count = sum(len(items) for items in candidates.values())
+    score_text = "no path"
+    if ranked_paths:
+        best = ranked_paths[0]
+        score_text = (
+            f"path_score={best.score:.3f} dx={best.displacement_x:.1f} "
+            f"area={best.average_area:.1f} smooth={best.smoothness:.2f}"
+        )
 
     draw_text(draw, (PADDING, PADDING), f"{clip_id} | {split} | {label}", title_font)
     draw_text(
         draw,
         (PADDING, PADDING + 30),
-        f"candidates={candidate_count} selected_path={len(path)}",
+        f"candidates={candidate_count} selected_path={len(selected_path)} | {score_text}",
         label_font,
         fill=MUTED,
     )
@@ -308,15 +432,11 @@ def render_sheet(
             draw.rectangle([x, y, x + THUMB_SIZE[0] - 1, y + THUMB_SIZE[1] - 1], outline=DIFF_COLOR, width=1)
             draw_text(draw, (x, y + THUMB_SIZE[1] + 5), f"t{frame_index + 1:02d}", small_font, fill=MUTED)
 
-    if len(path) >= 2:
-        for row_index in (0, 1):
-            y = HEADER_HEIGHT + row_index * row_height
-            points = []
-            for candidate in path:
-                x = PADDING + ROW_LABEL_WIDTH + candidate.frame_index * cell_width
-                cx, cy = scale_point(candidate, source_size)
-                points.append((x + cx, y + cy))
-            draw.line(points, fill=SELECTED, width=2)
+    for row_index in (0, 1):
+        y = HEADER_HEIGHT + row_index * row_height
+        for index, alternate_path in enumerate(alternate_paths):
+            draw_path(draw, alternate_path, y, cell_width, source_size, ALT_PATHS[index], width=1)
+        draw_path(draw, selected_path, y, cell_width, source_size, SELECTED, width=3)
     return sheet
 
 
@@ -337,14 +457,19 @@ def export_one(rgb_path: Path, output_root: Path, args) -> bool:
         max_y=args.max_y,
         max_candidates_per_frame=args.max_candidates_per_frame,
     )
-    path = link_candidates(candidates)
+    ranked_paths = rank_candidate_tracks(
+        candidates,
+        width=sequence.shape[2],
+        height=sequence.shape[1],
+        max_paths_per_candidate=args.max_paths_per_candidate,
+    )[: args.show_paths]
     relative = rgb_path.relative_to(args.variant_root / "rgb")
     split, label, filename = relative.parts
     output_path = output_root / split / label / f"{Path(filename).stem}.jpg"
     if output_path.exists() and not args.overwrite:
         return False
 
-    sheet = render_sheet(rgb_path, args.variant_root, sequence, diff, candidates, path)
+    sheet = render_sheet(rgb_path, args.variant_root, sequence, diff, candidates, ranked_paths)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     sheet.save(output_path, quality=92)
     return True
@@ -363,6 +488,8 @@ def main() -> None:
     parser.add_argument("--min-y", type=float, default=0.05, help="Minimum normalized y candidate position")
     parser.add_argument("--max-y", type=float, default=0.88, help="Maximum normalized y candidate position")
     parser.add_argument("--max-candidates-per-frame", type=int, default=10, help="Keep top candidates per frame")
+    parser.add_argument("--max-paths-per-candidate", type=int, default=8, help="Keep top partial paths per candidate")
+    parser.add_argument("--show-paths", type=int, default=3, help="Draw the top N ranked paths")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing debug sheets")
     args = parser.parse_args()
 
