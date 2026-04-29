@@ -224,7 +224,12 @@ def main() -> None:
         help="Input variant",
     )
     parser.add_argument("--variant-root", type=Path, default=VARIANTS_DIR, help="Variant dataset root")
-    parser.add_argument("--model", choices=["small_3d_cnn"], default="small_3d_cnn", help="Model architecture")
+    parser.add_argument(
+        "--model",
+        choices=["small_3d_cnn", "frame_cnn_pool"],
+        default="small_3d_cnn",
+        help="Model architecture",
+    )
     parser.add_argument("--epochs", type=int, default=DEFAULT_EPOCHS, help="Number of training epochs")
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE, help="Training batch size")
     parser.add_argument("--learning-rate", type=float, default=1e-4, help="Optimizer learning rate")
