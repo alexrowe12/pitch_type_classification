@@ -35,6 +35,7 @@ CANDIDATE = (255, 194, 80)
 SELECTED = (255, 66, 54)
 ALT_PATHS = [(84, 160, 255), (118, 212, 125)]
 DIFF_COLOR = (210, 210, 210)
+CORRIDOR = (180, 180, 255)
 
 
 @dataclass(frozen=True)
@@ -62,6 +63,20 @@ class RankedPath:
     displacement_y: float
     average_area: float
     smoothness: float
+    corridor_score: float
+    start_score: float
+
+
+@dataclass(frozen=True)
+class CorridorPrior:
+    """Expected normalized pitcher-release to plate/catcher corridor."""
+
+    start_x: float
+    start_y: float
+    end_x: float
+    end_y: float
+    width: float
+    early_frames: int
 
 
 def list_rgb_sequences(variant_root: Path, split: str | None, limit: int | None) -> list[Path]:
@@ -256,7 +271,46 @@ def path_smoothness(path: tuple[Candidate, ...]) -> float:
     return float(np.exp(-np.mean(changes) / 28.0))
 
 
-def rank_path(path: tuple[Candidate, ...], width: int, height: int) -> RankedPath:
+def point_line_distance_normalized(
+    x: float,
+    y: float,
+    start: tuple[float, float],
+    end: tuple[float, float],
+) -> float:
+    """Return point-to-line distance in normalized coordinates."""
+    sx, sy = start
+    ex, ey = end
+    line_x = ex - sx
+    line_y = ey - sy
+    denom = max(1e-6, line_x * line_x + line_y * line_y)
+    t = ((x - sx) * line_x + (y - sy) * line_y) / denom
+    t = float(np.clip(t, 0.0, 1.0))
+    nearest_x = sx + t * line_x
+    nearest_y = sy + t * line_y
+    return float(np.hypot(x - nearest_x, y - nearest_y))
+
+
+def candidate_corridor_score(candidate: Candidate, width: int, height: int, prior: CorridorPrior) -> float:
+    """Score how close a candidate is to the expected ball corridor."""
+    distance = point_line_distance_normalized(
+        candidate.x / width,
+        candidate.y / height,
+        start=(prior.start_x, prior.start_y),
+        end=(prior.end_x, prior.end_y),
+    )
+    return float(np.exp(-distance / max(1e-6, prior.width)))
+
+
+def candidate_start_score(candidate: Candidate, width: int, height: int, prior: CorridorPrior) -> float:
+    """Score early-frame proximity to expected release origin."""
+    if candidate.frame_index >= prior.early_frames:
+        return 0.0
+    distance = float(np.hypot(candidate.x / width - prior.start_x, candidate.y / height - prior.start_y))
+    time_weight = 1.0 - (candidate.frame_index / max(1, prior.early_frames))
+    return float(np.exp(-distance / max(1e-6, prior.width * 1.8)) * time_weight)
+
+
+def rank_path(path: tuple[Candidate, ...], width: int, height: int, prior: CorridorPrior) -> RankedPath:
     """Score a complete path using ball-flight priors."""
     start = path[0]
     end = path[-1]
@@ -270,6 +324,12 @@ def rank_path(path: tuple[Candidate, ...], width: int, height: int) -> RankedPat
     average_y = float(np.mean([candidate.y for candidate in path]))
     smoothness = path_smoothness(path)
     frame_coverage = len(path) / 12.0
+    corridor_score = float(np.mean([candidate_corridor_score(candidate, width, height, prior) for candidate in path]))
+    start_score = float(max(candidate_start_score(candidate, width, height, prior) for candidate in path))
+    start_projection = (
+        ((start.x / width - prior.start_x) * (prior.end_x - prior.start_x))
+        + ((start.y / height - prior.start_y) * (prior.end_y - prior.start_y))
+    )
 
     horizontal_score = np.clip(x_span / (width * 0.28), 0.0, 1.0)
     travel_score = np.clip(total_distance / (width * 0.35), 0.0, 1.0)
@@ -278,18 +338,22 @@ def rank_path(path: tuple[Candidate, ...], width: int, height: int) -> RankedPat
     vertical_stability = 1.0 - np.clip(y_span / (height * 0.40), 0.0, 1.0)
     direction_score = 0.8 if displacement_x >= -4 else 0.25
     body_stickiness_penalty = 0.30 if x_span < width * 0.08 else 0.0
+    late_start_penalty = 0.18 if start_projection > 0.22 else 0.0
 
     score = (
-        average_candidate_score * 0.18
-        + horizontal_score * 0.25
-        + travel_score * 0.18
+        average_candidate_score * 0.13
+        + horizontal_score * 0.18
+        + travel_score * 0.14
         + small_area_score * 0.13
-        + smoothness * 0.10
-        + frame_coverage * 0.08
+        + smoothness * 0.07
+        + frame_coverage * 0.06
         + mid_height_score * 0.05
-        + vertical_stability * 0.03
-        + direction_score * 0.04
+        + vertical_stability * 0.02
+        + direction_score * 0.03
+        + corridor_score * 0.23
+        + start_score * 0.16
         - body_stickiness_penalty
+        - late_start_penalty
     )
 
     return RankedPath(
@@ -299,6 +363,8 @@ def rank_path(path: tuple[Candidate, ...], width: int, height: int) -> RankedPat
         displacement_y=float(displacement_y),
         average_area=average_area,
         smoothness=smoothness,
+        corridor_score=corridor_score,
+        start_score=start_score,
     )
 
 
@@ -306,11 +372,12 @@ def rank_candidate_tracks(
     candidates_by_frame: dict[int, list[Candidate]],
     width: int,
     height: int,
+    prior: CorridorPrior,
     max_paths_per_candidate: int,
 ) -> list[RankedPath]:
     """Return ranked paths for review."""
     tracks = candidate_tracks(candidates_by_frame, max_paths_per_candidate=max_paths_per_candidate)
-    ranked = [rank_path(track, width=width, height=height) for track in tracks]
+    ranked = [rank_path(track, width=width, height=height, prior=prior) for track in tracks]
     ranked.sort(key=lambda item: item.score, reverse=True)
     return ranked
 
@@ -374,6 +441,23 @@ def draw_path(
     draw.line(points, fill=color, width=width)
 
 
+def draw_corridor(
+    draw: ImageDraw.ImageDraw,
+    prior: CorridorPrior,
+    row_y: int,
+    columns: int,
+    cell_width: int,
+) -> None:
+    """Draw expected corridor from first to last thumbnail."""
+    start_x = PADDING + ROW_LABEL_WIDTH + int(round(prior.start_x * THUMB_SIZE[0]))
+    start_y = row_y + int(round(prior.start_y * THUMB_SIZE[1]))
+    end_x = PADDING + ROW_LABEL_WIDTH + (columns - 1) * cell_width + int(round(prior.end_x * THUMB_SIZE[0]))
+    end_y = row_y + int(round(prior.end_y * THUMB_SIZE[1]))
+    draw.line([(start_x, start_y), (end_x, end_y)], fill=CORRIDOR, width=1)
+    radius = max(3, int(round(prior.width * THUMB_SIZE[0])))
+    draw.ellipse([start_x - radius, start_y - radius, start_x + radius, start_y + radius], outline=CORRIDOR, width=1)
+
+
 def render_sheet(
     rgb_path: Path,
     variant_root: Path,
@@ -381,6 +465,7 @@ def render_sheet(
     diff: np.ndarray,
     candidates: dict[int, list[Candidate]],
     ranked_paths: list[RankedPath],
+    prior: CorridorPrior,
 ) -> Image.Image:
     """Render one ball-track debug sheet."""
     relative = rgb_path.relative_to(variant_root / "rgb")
@@ -407,7 +492,7 @@ def render_sheet(
         best = ranked_paths[0]
         score_text = (
             f"path_score={best.score:.3f} dx={best.displacement_x:.1f} "
-            f"area={best.average_area:.1f} smooth={best.smoothness:.2f}"
+            f"area={best.average_area:.1f} corr={best.corridor_score:.2f} start={best.start_score:.2f}"
         )
 
     draw_text(draw, (PADDING, PADDING), f"{clip_id} | {split} | {label}", title_font)
@@ -434,6 +519,7 @@ def render_sheet(
 
     for row_index in (0, 1):
         y = HEADER_HEIGHT + row_index * row_height
+        draw_corridor(draw, prior, y, columns, cell_width)
         for index, alternate_path in enumerate(alternate_paths):
             draw_path(draw, alternate_path, y, cell_width, source_size, ALT_PATHS[index], width=1)
         draw_path(draw, selected_path, y, cell_width, source_size, SELECTED, width=3)
@@ -457,10 +543,19 @@ def export_one(rgb_path: Path, output_root: Path, args) -> bool:
         max_y=args.max_y,
         max_candidates_per_frame=args.max_candidates_per_frame,
     )
+    prior = CorridorPrior(
+        start_x=args.corridor_start_x,
+        start_y=args.corridor_start_y,
+        end_x=args.corridor_end_x,
+        end_y=args.corridor_end_y,
+        width=args.corridor_width,
+        early_frames=args.early_frames,
+    )
     ranked_paths = rank_candidate_tracks(
         candidates,
         width=sequence.shape[2],
         height=sequence.shape[1],
+        prior=prior,
         max_paths_per_candidate=args.max_paths_per_candidate,
     )[: args.show_paths]
     relative = rgb_path.relative_to(args.variant_root / "rgb")
@@ -469,7 +564,7 @@ def export_one(rgb_path: Path, output_root: Path, args) -> bool:
     if output_path.exists() and not args.overwrite:
         return False
 
-    sheet = render_sheet(rgb_path, args.variant_root, sequence, diff, candidates, ranked_paths)
+    sheet = render_sheet(rgb_path, args.variant_root, sequence, diff, candidates, ranked_paths, prior)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     sheet.save(output_path, quality=92)
     return True
@@ -490,6 +585,12 @@ def main() -> None:
     parser.add_argument("--max-candidates-per-frame", type=int, default=10, help="Keep top candidates per frame")
     parser.add_argument("--max-paths-per-candidate", type=int, default=8, help="Keep top partial paths per candidate")
     parser.add_argument("--show-paths", type=int, default=3, help="Draw the top N ranked paths")
+    parser.add_argument("--corridor-start-x", type=float, default=0.30, help="Expected release corridor start x")
+    parser.add_argument("--corridor-start-y", type=float, default=0.32, help="Expected release corridor start y")
+    parser.add_argument("--corridor-end-x", type=float, default=0.72, help="Expected plate corridor end x")
+    parser.add_argument("--corridor-end-y", type=float, default=0.48, help="Expected plate corridor end y")
+    parser.add_argument("--corridor-width", type=float, default=0.16, help="Expected corridor width")
+    parser.add_argument("--early-frames", type=int, default=4, help="Frames considered near release for start prior")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing debug sheets")
     args = parser.parse_args()
 
