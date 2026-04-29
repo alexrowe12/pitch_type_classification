@@ -4,7 +4,7 @@ Export derived sequence variants for binary pitch classification.
 
 Usage:
     python -m modeling.export_variants
-    python -m modeling.export_variants --variants rgb diff rgb_diff
+    python -m modeling.export_variants --variants rgb diff rgb_diff ball_motion rgb_ball_motion
 """
 
 import argparse
@@ -20,7 +20,7 @@ from modeling.paths import VARIANTS_DIR, ensure_modeling_dirs
 from stage_b.paths import SEQUENCES_DIR
 
 
-DEFAULT_VARIANTS = ("rgb", "diff", "rgb_diff")
+DEFAULT_VARIANTS = ("rgb", "diff", "rgb_diff", "ball_motion", "rgb_ball_motion")
 DEFAULT_WORKERS = min(8, os.cpu_count() or 1)
 
 
@@ -59,6 +59,35 @@ def temporal_diff(sequence: np.ndarray) -> np.ndarray:
     return diffs.astype(np.float32)
 
 
+def ball_color_mask(sequence: np.ndarray) -> np.ndarray:
+    """Return a soft mask for bright, low-saturation baseball-like pixels."""
+    red = sequence[..., 0]
+    green = sequence[..., 1]
+    blue = sequence[..., 2]
+    max_channel = np.max(sequence, axis=-1)
+    min_channel = np.min(sequence, axis=-1)
+    saturation = (max_channel - min_channel) / np.maximum(max_channel, 1e-6)
+
+    brightness_score = np.clip((max_channel - 0.50) / 0.35, 0.0, 1.0)
+    low_saturation_score = np.clip((0.55 - saturation) / 0.55, 0.0, 1.0)
+    warm_score = np.clip(((red + green) * 0.5 - blue + 0.15) / 0.35, 0.0, 1.0)
+
+    mask = brightness_score * low_saturation_score * warm_score
+    return mask[..., np.newaxis].astype(np.float32)
+
+
+def ball_motion(sequence: np.ndarray) -> np.ndarray:
+    """Return a motion channel biased toward small bright baseball-like objects."""
+    diff = temporal_diff(sequence)
+    mask = ball_color_mask(sequence)
+    enhanced = diff * mask
+
+    max_value = float(enhanced.max())
+    if max_value > 0:
+        enhanced = enhanced / max_value
+    return enhanced.astype(np.float32)
+
+
 def build_variant(sequence: np.ndarray, variant: str) -> np.ndarray:
     """Build one model input variant from an RGB sequence."""
     if variant == "rgb":
@@ -67,6 +96,10 @@ def build_variant(sequence: np.ndarray, variant: str) -> np.ndarray:
         return temporal_diff(sequence)
     if variant == "rgb_diff":
         return np.concatenate([sequence.astype(np.float32), temporal_diff(sequence)], axis=-1)
+    if variant == "ball_motion":
+        return ball_motion(sequence)
+    if variant == "rgb_ball_motion":
+        return np.concatenate([sequence.astype(np.float32), ball_motion(sequence)], axis=-1)
     raise ValueError(f"Unknown variant: {variant}")
 
 

@@ -31,6 +31,8 @@ MUTED = (161, 170, 181)
 RGB_BORDER = (91, 156, 220)
 DIFF_BORDER = (245, 184, 82)
 OVERLAY_BORDER = (118, 191, 137)
+BALL_BORDER = (239, 105, 82)
+BALL_OVERLAY_BORDER = (242, 214, 101)
 
 
 def list_rgb_sequences(variant_root: Path, split: str | None, limit: int | None) -> list[Path]:
@@ -49,6 +51,12 @@ def variant_path_for(rgb_path: Path, variant_root: Path, variant: str) -> Path:
     """Return the corresponding path for another variant."""
     relative_path = rgb_path.relative_to(variant_root / "rgb")
     return variant_root / variant / relative_path
+
+
+def optional_variant_path_for(rgb_path: Path, variant_root: Path, variant: str) -> Path | None:
+    """Return corresponding variant path if it exists."""
+    path = variant_path_for(rgb_path, variant_root, variant)
+    return path if path.exists() else None
 
 
 def load_font(size: int) -> ImageFont.ImageFont:
@@ -96,6 +104,19 @@ def overlay_frame_to_image(rgb_frame: np.ndarray, diff_frame: np.ndarray) -> Ima
     return Image.fromarray(np.clip(overlay, 0, 255).astype(np.uint8), mode="RGB").resize(THUMB_SIZE)
 
 
+def ball_overlay_frame_to_image(rgb_frame: np.ndarray, ball_frame: np.ndarray) -> Image.Image:
+    """Overlay ball-motion highlights on top of RGB."""
+    rgb = np.clip(rgb_frame * 255.0, 0, 255).astype(np.float32)
+    ball = np.clip(ball_frame[..., 0], 0.0, 1.0)
+    heat = np.zeros_like(rgb)
+    heat[..., 0] = 255.0
+    heat[..., 1] = 48.0
+    heat[..., 2] = 36.0
+    alpha = np.clip(ball[..., np.newaxis] * 2.2, 0.0, 0.90)
+    overlay = (rgb * (1.0 - alpha)) + (heat * alpha)
+    return Image.fromarray(np.clip(overlay, 0, 255).astype(np.uint8), mode="RGB").resize(THUMB_SIZE)
+
+
 def draw_frame_row(
     sheet: Image.Image,
     draw: ImageDraw.ImageDraw,
@@ -132,9 +153,13 @@ def render_contact_sheet(rgb_path: Path, variant_root: Path, subtitle: str | Non
 
     rgb = np.load(rgb_path)
     diff = np.load(diff_path)
+    ball_path = optional_variant_path_for(rgb_path, variant_root, "ball_motion")
+    ball = np.load(ball_path) if ball_path is not None else None
 
     if rgb.shape[:3] != diff.shape[:3]:
         raise ValueError(f"RGB/diff shape mismatch for {rgb_path}: {rgb.shape} vs {diff.shape}")
+    if ball is not None and rgb.shape[:3] != ball.shape[:3]:
+        raise ValueError(f"RGB/ball-motion shape mismatch for {rgb_path}: {rgb.shape} vs {ball.shape}")
 
     relative = rgb_path.relative_to(variant_root / "rgb")
     split, label, filename = relative.parts
@@ -142,7 +167,8 @@ def render_contact_sheet(rgb_path: Path, variant_root: Path, subtitle: str | Non
 
     columns = rgb.shape[0]
     width = PADDING * 2 + ROW_LABEL_WIDTH + columns * (THUMB_SIZE[0] + PADDING)
-    height = HEADER_HEIGHT + 3 * (THUMB_SIZE[1] + LABEL_HEIGHT + ROW_GAP) + PADDING
+    row_count = 5 if ball is not None else 3
+    height = HEADER_HEIGHT + row_count * (THUMB_SIZE[1] + LABEL_HEIGHT + ROW_GAP) + PADDING
     sheet = Image.new("RGB", (width, height), BACKGROUND)
     draw = ImageDraw.Draw(sheet)
 
@@ -161,7 +187,15 @@ def render_contact_sheet(rgb_path: Path, variant_root: Path, subtitle: str | Non
     y = HEADER_HEIGHT
     y = draw_frame_row(sheet, draw, "RGB", rgb_images, y, RGB_BORDER, label_font, small_font)
     y = draw_frame_row(sheet, draw, "Diff", diff_images, y, DIFF_BORDER, label_font, small_font)
-    draw_frame_row(sheet, draw, "Overlay", overlay_images, y, OVERLAY_BORDER, label_font, small_font)
+    y = draw_frame_row(sheet, draw, "Overlay", overlay_images, y, OVERLAY_BORDER, label_font, small_font)
+    if ball is not None:
+        ball_images = [diff_frame_to_image(frame) for frame in ball]
+        ball_overlay_images = [
+            ball_overlay_frame_to_image(rgb_frame, ball_frame)
+            for rgb_frame, ball_frame in zip(rgb, ball)
+        ]
+        y = draw_frame_row(sheet, draw, "Ball", ball_images, y, BALL_BORDER, label_font, small_font)
+        draw_frame_row(sheet, draw, "Ball+", ball_overlay_images, y, BALL_OVERLAY_BORDER, label_font, small_font)
     return sheet
 
 

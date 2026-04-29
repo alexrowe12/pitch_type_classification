@@ -217,7 +217,12 @@ def save_predictions_csv(path: Path, predictions: list[dict]) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train a binary pitch classifier")
-    parser.add_argument("--variant", choices=["rgb", "diff", "rgb_diff"], default="rgb", help="Input variant")
+    parser.add_argument(
+        "--variant",
+        choices=["rgb", "diff", "rgb_diff", "ball_motion", "rgb_ball_motion"],
+        default="rgb",
+        help="Input variant",
+    )
     parser.add_argument("--variant-root", type=Path, default=VARIANTS_DIR, help="Variant dataset root")
     parser.add_argument("--model", choices=["small_3d_cnn"], default="small_3d_cnn", help="Model architecture")
     parser.add_argument("--epochs", type=int, default=DEFAULT_EPOCHS, help="Number of training epochs")
