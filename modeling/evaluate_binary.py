@@ -97,6 +97,7 @@ def main() -> None:
         "training_summary": {
             "train_samples": run_metrics.get("train_samples"),
             "val_samples": run_metrics.get("val_samples"),
+            "selection_device": run_metrics.get("selection_device"),
             "best_val_metrics": run_metrics.get("best_val_metrics"),
         },
         "metrics": {key: value for key, value in metrics.items() if key != "predictions"},

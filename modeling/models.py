@@ -4,26 +4,46 @@ import torch
 from torch import nn
 
 
+def norm_2d(kind: str, channels: int) -> nn.Module:
+    """Return a 2D normalization layer."""
+    if kind == "batch":
+        return nn.BatchNorm2d(channels)
+    if kind == "group":
+        groups = min(8, channels)
+        return nn.GroupNorm(groups, channels)
+    raise ValueError(f"Unknown normalization kind: {kind}")
+
+
+def norm_3d(kind: str, channels: int) -> nn.Module:
+    """Return a 3D normalization layer."""
+    if kind == "batch":
+        return nn.BatchNorm3d(channels)
+    if kind == "group":
+        groups = min(8, channels)
+        return nn.GroupNorm(groups, channels)
+    raise ValueError(f"Unknown normalization kind: {kind}")
+
+
 class Small3DCNN(nn.Module):
     """Compact 3D CNN baseline for short pitch sequences."""
 
-    def __init__(self, input_channels: int, num_classes: int = 2, dropout: float = 0.35):
+    def __init__(self, input_channels: int, num_classes: int = 2, dropout: float = 0.35, norm: str = "batch"):
         super().__init__()
         self.features = nn.Sequential(
             nn.Conv3d(input_channels, 16, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm3d(16),
+            norm_3d(norm, 16),
             nn.ReLU(inplace=True),
             nn.MaxPool3d(kernel_size=(1, 2, 2)),
             nn.Conv3d(16, 32, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm3d(32),
+            norm_3d(norm, 32),
             nn.ReLU(inplace=True),
             nn.MaxPool3d(kernel_size=(2, 2, 2)),
             nn.Conv3d(32, 64, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm3d(64),
+            norm_3d(norm, 64),
             nn.ReLU(inplace=True),
             nn.MaxPool3d(kernel_size=(2, 2, 2)),
             nn.Conv3d(64, 128, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm3d(128),
+            norm_3d(norm, 128),
             nn.ReLU(inplace=True),
             nn.AdaptiveAvgPool3d((1, 1, 1)),
         )
@@ -41,23 +61,23 @@ class Small3DCNN(nn.Module):
 class FrameCNNPool(nn.Module):
     """2D frame encoder with temporal average/max pooling."""
 
-    def __init__(self, input_channels: int, num_classes: int = 2, dropout: float = 0.35):
+    def __init__(self, input_channels: int, num_classes: int = 2, dropout: float = 0.35, norm: str = "batch"):
         super().__init__()
         self.frame_encoder = nn.Sequential(
             nn.Conv2d(input_channels, 16, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(16),
+            norm_2d(norm, 16),
             nn.ReLU(inplace=True),
             nn.MaxPool2d(kernel_size=2),
             nn.Conv2d(16, 32, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(32),
+            norm_2d(norm, 32),
             nn.ReLU(inplace=True),
             nn.MaxPool2d(kernel_size=2),
             nn.Conv2d(32, 64, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(64),
+            norm_2d(norm, 64),
             nn.ReLU(inplace=True),
             nn.MaxPool2d(kernel_size=2),
             nn.Conv2d(64, 128, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(128),
+            norm_2d(norm, 128),
             nn.ReLU(inplace=True),
             nn.AdaptiveAvgPool2d((1, 1)),
         )
@@ -85,6 +105,10 @@ def build_model(model_name: str, input_channels: int, dropout: float = 0.35) -> 
     """Build a model by name."""
     if model_name == "small_3d_cnn":
         return Small3DCNN(input_channels=input_channels, dropout=dropout)
+    if model_name == "small_3d_cnn_gn":
+        return Small3DCNN(input_channels=input_channels, dropout=dropout, norm="group")
     if model_name == "frame_cnn_pool":
         return FrameCNNPool(input_channels=input_channels, dropout=dropout)
+    if model_name == "frame_cnn_pool_gn":
+        return FrameCNNPool(input_channels=input_channels, dropout=dropout, norm="group")
     raise ValueError(f"Unknown model: {model_name}")

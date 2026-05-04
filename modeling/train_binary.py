@@ -217,6 +217,39 @@ def save_predictions_csv(path: Path, predictions: list[dict]) -> None:
         writer.writerows(predictions)
 
 
+def checkpoint_payload(model, args, input_channels: int) -> dict:
+    """Build a serializable model checkpoint payload."""
+    return {
+        "model_state_dict": {key: value.detach().cpu() for key, value in model.state_dict().items()},
+        "variant": args.variant,
+        "model": args.model,
+        "input_channels": input_channels,
+        "label_to_index": LABEL_TO_INDEX,
+        "args": vars(args),
+        "dropout": args.dropout,
+    }
+
+
+def evaluate_for_selection(
+    model,
+    val_loader,
+    criterion,
+    train_device: torch.device,
+    selection_device: torch.device,
+    model_name: str,
+    input_channels: int,
+    dropout: float,
+) -> dict:
+    """Evaluate validation metrics on the requested device for checkpoint selection."""
+    if selection_device == train_device:
+        return evaluate(model, val_loader, criterion, train_device)
+
+    selection_model = build_model(model_name, input_channels=input_channels, dropout=dropout).to(selection_device)
+    selection_model.load_state_dict({key: value.detach().cpu() for key, value in model.state_dict().items()})
+    selection_criterion = nn.CrossEntropyLoss()
+    return evaluate(selection_model, val_loader, selection_criterion, selection_device)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train a binary pitch classifier")
     parser.add_argument(
@@ -228,7 +261,7 @@ def main() -> None:
     parser.add_argument("--variant-root", type=Path, default=VARIANTS_DIR, help="Variant dataset root")
     parser.add_argument(
         "--model",
-        choices=["small_3d_cnn", "frame_cnn_pool"],
+        choices=["small_3d_cnn", "small_3d_cnn_gn", "frame_cnn_pool", "frame_cnn_pool_gn"],
         default="small_3d_cnn",
         help="Model architecture",
     )
@@ -253,6 +286,12 @@ def main() -> None:
         default="auto",
         help="Device to use. Defaults to auto, preferring Apple MPS, then CUDA, then CPU.",
     )
+    parser.add_argument(
+        "--selection-device",
+        choices=["same", "cpu"],
+        default="same",
+        help="Device used for validation metrics and best-checkpoint selection.",
+    )
     parser.add_argument("--num-workers", type=int, default=0, help="DataLoader worker count")
     args = parser.parse_args()
 
@@ -266,6 +305,7 @@ def main() -> None:
     val_dataset = train_dataset if args.overfit_samples else datasets["val"]
 
     device = select_device(args.device)
+    selection_device = torch.device("cpu") if args.selection_device == "cpu" else device
     pin_memory = should_pin_memory(device)
     input_channels = infer_input_channels(args.variant, args.variant_root)
     model = build_model(args.model, input_channels=input_channels, dropout=args.dropout).to(device)
@@ -292,11 +332,12 @@ def main() -> None:
     run_dir = RUNS_DIR / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Using device: {device}")
-    print(f"Run: {run_id}")
-    print(f"Variant: {args.variant}, input_channels={input_channels}")
-    print(f"Train samples: {len(train_dataset)}, val samples: {len(val_dataset)}")
-    print(f"Cache data: {args.cache_data}, train_eval_interval={args.train_eval_interval}")
+    print(f"Using device: {device}", flush=True)
+    print(f"Run: {run_id}", flush=True)
+    print(f"Variant: {args.variant}, input_channels={input_channels}", flush=True)
+    print(f"Train samples: {len(train_dataset)}, val samples: {len(val_dataset)}", flush=True)
+    print(f"Cache data: {args.cache_data}, train_eval_interval={args.train_eval_interval}", flush=True)
+    print(f"Selection device: {selection_device}", flush=True)
 
     best_f1 = -1.0
     history = []
@@ -304,8 +345,30 @@ def main() -> None:
     for epoch in range(args.epochs):
         train_loss = train_one_epoch(model, train_loader, criterion, optimizer, device)
         should_eval_train = args.train_eval_interval > 0 and (epoch == 0 or (epoch + 1) % args.train_eval_interval == 0)
-        train_metrics = evaluate(model, train_loader, criterion, device) if should_eval_train else None
-        val_metrics = evaluate(model, val_loader, criterion, device)
+        train_metrics = (
+            evaluate_for_selection(
+                model=model,
+                val_loader=train_loader,
+                criterion=criterion,
+                train_device=device,
+                selection_device=selection_device,
+                model_name=args.model,
+                input_channels=input_channels,
+                dropout=args.dropout,
+            )
+            if should_eval_train
+            else None
+        )
+        val_metrics = evaluate_for_selection(
+            model=model,
+            val_loader=val_loader,
+            criterion=criterion,
+            train_device=device,
+            selection_device=selection_device,
+            model_name=args.model,
+            input_channels=input_channels,
+            dropout=args.dropout,
+        )
         epoch_metrics = {
             "epoch": epoch + 1,
             "train_loss": train_loss,
@@ -326,37 +389,16 @@ def main() -> None:
             f"Epoch {epoch + 1}/{args.epochs} "
             f"train_loss={train_loss:.4f} {train_summary}"
             f"val_loss={val_metrics['loss']:.4f} val_acc={val_metrics['accuracy']:.3f} "
-            f"val_f1={val_metrics['f1']:.3f}"
+            f"val_f1={val_metrics['f1']:.3f}",
+            flush=True,
         )
 
         if val_metrics["f1"] > best_f1:
             best_f1 = val_metrics["f1"]
             best_metrics = val_metrics
-            torch.save(
-                {
-                    "model_state_dict": model.state_dict(),
-                    "variant": args.variant,
-                    "model": args.model,
-                    "input_channels": input_channels,
-                    "label_to_index": LABEL_TO_INDEX,
-                    "args": vars(args),
-                    "dropout": args.dropout,
-                },
-                run_dir / "best_model.pt",
-            )
+            torch.save(checkpoint_payload(model, args, input_channels), run_dir / "best_model.pt")
 
-    torch.save(
-        {
-            "model_state_dict": model.state_dict(),
-            "variant": args.variant,
-            "model": args.model,
-            "input_channels": input_channels,
-            "label_to_index": LABEL_TO_INDEX,
-            "args": vars(args),
-            "dropout": args.dropout,
-        },
-        run_dir / "final_model.pt",
-    )
+    torch.save(checkpoint_payload(model, args, input_channels), run_dir / "final_model.pt")
 
     metrics = {
         "run_id": run_id,
@@ -366,6 +408,7 @@ def main() -> None:
         "dropout": args.dropout,
         "seed": args.seed,
         "device": str(device),
+        "selection_device": str(selection_device),
         "train_samples": len(train_dataset),
         "val_samples": len(val_dataset),
         "overfit_samples": args.overfit_samples,
@@ -378,10 +421,10 @@ def main() -> None:
     save_json(run_dir / "metrics.json", metrics)
     save_predictions_csv(run_dir / "predictions_val.csv", best_metrics.get("predictions", []))
 
-    print(f"Saved best model to: {run_dir / 'best_model.pt'}")
-    print(f"Saved final model to: {run_dir / 'final_model.pt'}")
-    print(f"Saved metrics to: {run_dir / 'metrics.json'}")
-    print(f"Saved validation predictions to: {run_dir / 'predictions_val.csv'}")
+    print(f"Saved best model to: {run_dir / 'best_model.pt'}", flush=True)
+    print(f"Saved final model to: {run_dir / 'final_model.pt'}", flush=True)
+    print(f"Saved metrics to: {run_dir / 'metrics.json'}", flush=True)
+    print(f"Saved validation predictions to: {run_dir / 'predictions_val.csv'}", flush=True)
 
 
 if __name__ == "__main__":
