@@ -173,7 +173,7 @@ def sample_display_rows(rows: list[dict], release_frame_idx: int, catch_frame_id
     return [rows[index] for index in sorted(selected_indices)]
 
 
-def local_rows(rows: list[dict], center_frame_idx: int, radius: int = 4) -> list[dict]:
+def local_rows(rows: list[dict], center_frame_idx: int, radius: int = 2) -> list[dict]:
     """Return a small local window of rows around one frame."""
     frame_indices = [row["frame_idx"] for row in rows]
     center_frame_idx = nearest_available_frame(frame_indices, center_frame_idx)
@@ -215,22 +215,25 @@ def inject_hotkeys() -> None:
     st.html(
         """
         <script>
+        const win = window.parent;
         const doc = window.parent.document;
-        if (!doc.__stageBHotkeysBound) {
-          doc.__stageBHotkeysBound = true;
-          doc.addEventListener("keydown", function(event) {
+        if (!win.__stageBHotkeysBoundV2) {
+          win.__stageBHotkeysBoundV2 = true;
+          win.addEventListener("keydown", function(event) {
             const activeTag = doc.activeElement ? doc.activeElement.tagName : "";
-            if (["INPUT", "TEXTAREA"].includes(activeTag)) {
-              return;
-            }
             const key = event.key.toLowerCase();
             const code = event.code;
+            const isEnter = key === "enter" || code === "Enter" || code === "NumpadEnter";
+            if (!isEnter && ["INPUT", "TEXTAREA"].includes(activeTag)) {
+              return;
+            }
             const buttons = Array.from(doc.querySelectorAll("button"));
             const clickByPrefix = (prefix) => {
               const button = buttons.find(btn => btn.innerText.trim().startsWith(prefix));
               if (button) {
                 event.preventDefault();
                 event.stopPropagation();
+                event.stopImmediatePropagation();
                 button.click();
               }
             };
@@ -242,7 +245,7 @@ def inject_hotkeys() -> None:
               clickByPrefix("Catch -1");
             } else if (key === "l") {
               clickByPrefix("Catch +1");
-            } else if (key === "enter" || code === "Enter" || code === "NumpadEnter") {
+            } else if (isEnter) {
               clickByPrefix("Save Usable");
             } else if (key === "u") {
               clickByPrefix("Mark Unusable");
@@ -378,8 +381,8 @@ def main() -> None:
     zoom_cols = st.columns(2)
     zoom_cols[0].markdown("**Release Zoom**")
     zoom_cols[1].markdown("**Catch Zoom**")
-    release_zoom = local_rows(clip_rows, st.session_state.release_frame_idx, radius=4)
-    catch_zoom = local_rows(clip_rows, st.session_state.catch_frame_idx, radius=4)
+    release_zoom = local_rows(clip_rows, st.session_state.release_frame_idx)
+    catch_zoom = local_rows(clip_rows, st.session_state.catch_frame_idx)
     for container, zoom_rows, target_frame, label in [
         (zoom_cols[0], release_zoom, st.session_state.release_frame_idx, "RELEASE"),
         (zoom_cols[1], catch_zoom, st.session_state.catch_frame_idx, "CATCH"),
@@ -395,12 +398,13 @@ def main() -> None:
         clip_rows,
         release_frame_idx=st.session_state.release_frame_idx,
         catch_frame_idx=st.session_state.catch_frame_idx,
-        max_frames=36,
+        max_frames=24,
     )
-    cols = st.columns(6)
+    display_columns = 3
+    cols = st.columns(display_columns)
     for index, row in enumerate(display_rows):
         frame_idx = row["frame_idx"]
-        col = cols[index % 6]
+        col = cols[index % display_columns]
         button_key_prefix = f"{next_clip_id}_{frame_idx}"
         if frame_idx == st.session_state.release_frame_idx:
             col.markdown("**RELEASE**")
