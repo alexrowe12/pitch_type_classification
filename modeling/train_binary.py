@@ -70,13 +70,14 @@ def build_loader(
         shuffle=shuffle,
         num_workers=num_workers,
         pin_memory=pin_memory,
+        persistent_workers=num_workers > 0,
     )
 
 
-def load_datasets(variant: str, variant_root: Path) -> dict[str, PitchSequenceDataset]:
+def load_datasets(variant: str, variant_root: Path, cache_data: bool) -> dict[str, PitchSequenceDataset]:
     """Load train/val/test datasets."""
     return {
-        split: PitchSequenceDataset(list_variant_rows(variant, split, variant_root=variant_root))
+        split: PitchSequenceDataset(list_variant_rows(variant, split, variant_root=variant_root), cache_data=cache_data)
         for split in ("train", "val", "test")
     }
 
@@ -121,8 +122,8 @@ def train_one_epoch(model, loader, criterion, optimizer, device) -> float:
     total_loss = 0.0
     total_examples = 0
     for inputs, labels, _clip_ids in loader:
-        inputs = inputs.to(device)
-        labels = labels.to(device)
+        inputs = inputs.to(device, non_blocking=True)
+        labels = labels.to(device, non_blocking=True)
 
         optimizer.zero_grad()
         logits = model(inputs)
@@ -148,8 +149,9 @@ def evaluate(model, loader, criterion, device) -> dict:
     total_examples = 0
 
     for inputs, labels, batch_clip_ids in loader:
-        inputs = inputs.to(device)
-        labels = labels.to(device)
+        true_labels = labels.tolist()
+        inputs = inputs.to(device, non_blocking=True)
+        labels = labels.to(device, non_blocking=True)
         logits = model(inputs)
         loss = criterion(logits, labels)
         probabilities = torch.softmax(logits, dim=1)
@@ -158,7 +160,7 @@ def evaluate(model, loader, criterion, device) -> dict:
         batch_size = labels.size(0)
         total_loss += loss.item() * batch_size
         total_examples += batch_size
-        y_true.extend(labels.cpu().tolist())
+        y_true.extend(true_labels)
         y_pred.extend(preds.cpu().tolist())
         y_prob.extend(probabilities[:, LABEL_TO_INDEX["offspeed"]].cpu().tolist())
         clip_ids.extend(batch_clip_ids)
@@ -238,6 +240,13 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--overfit-samples", type=int, default=0, help="Use N train samples for overfit sanity check")
     parser.add_argument("--run-id", type=str, default=None, help="Optional run identifier")
+    parser.add_argument("--cache-data", action="store_true", help="Load train/val/test arrays into memory before training")
+    parser.add_argument(
+        "--train-eval-interval",
+        type=int,
+        default=1,
+        help="Evaluate train metrics every N epochs. Use 0 to skip full train evaluation during training.",
+    )
     parser.add_argument(
         "--device",
         choices=["auto", "mps", "cuda", "cpu"],
@@ -249,7 +258,7 @@ def main() -> None:
 
     ensure_modeling_dirs()
     set_seed(args.seed)
-    datasets = load_datasets(args.variant, args.variant_root)
+    datasets = load_datasets(args.variant, args.variant_root, cache_data=args.cache_data)
     if len(datasets["train"]) == 0 or len(datasets["val"]) == 0:
         raise ValueError("Training requires non-empty train and val datasets. Run variant export and val split first.")
 
@@ -287,28 +296,35 @@ def main() -> None:
     print(f"Run: {run_id}")
     print(f"Variant: {args.variant}, input_channels={input_channels}")
     print(f"Train samples: {len(train_dataset)}, val samples: {len(val_dataset)}")
+    print(f"Cache data: {args.cache_data}, train_eval_interval={args.train_eval_interval}")
 
     best_f1 = -1.0
     history = []
     best_metrics = {}
     for epoch in range(args.epochs):
         train_loss = train_one_epoch(model, train_loader, criterion, optimizer, device)
-        train_metrics = evaluate(model, train_loader, criterion, device)
+        should_eval_train = args.train_eval_interval > 0 and (epoch == 0 or (epoch + 1) % args.train_eval_interval == 0)
+        train_metrics = evaluate(model, train_loader, criterion, device) if should_eval_train else None
         val_metrics = evaluate(model, val_loader, criterion, device)
         epoch_metrics = {
             "epoch": epoch + 1,
             "train_loss": train_loss,
-            "train_accuracy": train_metrics["accuracy"],
-            "train_f1": train_metrics["f1"],
+            "train_accuracy": train_metrics["accuracy"] if train_metrics else None,
+            "train_f1": train_metrics["f1"] if train_metrics else None,
             "val_loss": val_metrics["loss"],
             "val_accuracy": val_metrics["accuracy"],
             "val_f1": val_metrics["f1"],
         }
         history.append(epoch_metrics)
 
+        train_summary = (
+            f"train_acc={train_metrics['accuracy']:.3f} train_f1={train_metrics['f1']:.3f} "
+            if train_metrics
+            else "train_acc=skipped train_f1=skipped "
+        )
         print(
             f"Epoch {epoch + 1}/{args.epochs} "
-            f"train_loss={train_loss:.4f} train_acc={train_metrics['accuracy']:.3f} "
+            f"train_loss={train_loss:.4f} {train_summary}"
             f"val_loss={val_metrics['loss']:.4f} val_acc={val_metrics['accuracy']:.3f} "
             f"val_f1={val_metrics['f1']:.3f}"
         )
@@ -329,6 +345,19 @@ def main() -> None:
                 run_dir / "best_model.pt",
             )
 
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "variant": args.variant,
+            "model": args.model,
+            "input_channels": input_channels,
+            "label_to_index": LABEL_TO_INDEX,
+            "args": vars(args),
+            "dropout": args.dropout,
+        },
+        run_dir / "final_model.pt",
+    )
+
     metrics = {
         "run_id": run_id,
         "variant": args.variant,
@@ -340,6 +369,8 @@ def main() -> None:
         "train_samples": len(train_dataset),
         "val_samples": len(val_dataset),
         "overfit_samples": args.overfit_samples,
+        "cache_data": args.cache_data,
+        "train_eval_interval": args.train_eval_interval,
         "history": history,
         "best_val_metrics": {key: value for key, value in best_metrics.items() if key != "predictions"},
         "label_to_index": LABEL_TO_INDEX,
@@ -348,6 +379,7 @@ def main() -> None:
     save_predictions_csv(run_dir / "predictions_val.csv", best_metrics.get("predictions", []))
 
     print(f"Saved best model to: {run_dir / 'best_model.pt'}")
+    print(f"Saved final model to: {run_dir / 'final_model.pt'}")
     print(f"Saved metrics to: {run_dir / 'metrics.json'}")
     print(f"Saved validation predictions to: {run_dir / 'predictions_val.csv'}")
 

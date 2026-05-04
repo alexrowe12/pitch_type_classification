@@ -41,23 +41,33 @@ def list_variant_rows(variant: str, split: str, variant_root: Path = VARIANTS_DI
 class PitchSequenceDataset(Dataset):
     """Dataset for fixed-length pitch sequence arrays."""
 
-    def __init__(self, rows: list[dict]):
+    def __init__(self, rows: list[dict], cache_data: bool = False):
         self.rows = rows
+        self.cached_items = [self.load_item(row) for row in rows] if cache_data else None
 
     def __len__(self) -> int:
         return len(self.rows)
 
-    def __getitem__(self, index: int):
-        row = self.rows[index]
+    @staticmethod
+    def load_item(row: dict):
         sequence = np.load(row["path"]).astype(np.float32)
         tensor = torch.from_numpy(sequence).permute(3, 0, 1, 2).contiguous()
         label = torch.tensor(row["label_index"], dtype=torch.long)
         return tensor, label, row["clip_id"]
 
+    def __getitem__(self, index: int):
+        if self.cached_items is not None:
+            return self.cached_items[index]
+        return self.load_item(self.rows[index])
 
-def load_variant_datasets(variant: str, variant_root: Path = VARIANTS_DIR) -> dict[str, PitchSequenceDataset]:
+
+def load_variant_datasets(
+    variant: str,
+    variant_root: Path = VARIANTS_DIR,
+    cache_data: bool = False,
+) -> dict[str, PitchSequenceDataset]:
     """Load train/val/test datasets for a variant."""
     return {
-        split: PitchSequenceDataset(list_variant_rows(variant, split, variant_root=variant_root))
+        split: PitchSequenceDataset(list_variant_rows(variant, split, variant_root=variant_root), cache_data=cache_data)
         for split in SPLITS
     }
