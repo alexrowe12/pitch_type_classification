@@ -120,6 +120,78 @@ def remove_last_manual_event() -> bool:
     return True
 
 
+def already_labeled(clip_id: str, manual_rows: list[dict]) -> bool:
+    """Return whether a clip already has a manual row."""
+    return any(row["clip_id"] == clip_id for row in manual_rows)
+
+
+def clear_query_action() -> None:
+    """Remove one-shot hotkey action params from the URL."""
+    import streamlit as st
+
+    for key in (
+        "stage_b_action",
+        "stage_b_clip_id",
+        "stage_b_release",
+        "stage_b_catch",
+        "stage_b_usable",
+        "stage_b_notes",
+        "stage_b_nonce",
+    ):
+        if key in st.query_params:
+            del st.query_params[key]
+
+
+def process_query_action(
+    grouped_rows: dict[str, list[dict]],
+    weak_events: dict[str, dict],
+    manual_rows: list[dict],
+) -> None:
+    """Handle robust one-shot actions triggered by keyboard shortcuts."""
+    import streamlit as st
+
+    action = st.query_params.get("stage_b_action")
+    if not action:
+        return
+
+    if action == "undo":
+        clear_query_action()
+        remove_last_manual_event()
+        st.rerun()
+
+    if action != "save":
+        clear_query_action()
+        st.rerun()
+
+    clip_id = st.query_params.get("stage_b_clip_id", "")
+    clip_rows = grouped_rows.get(clip_id)
+    if not clip_rows or already_labeled(clip_id, manual_rows):
+        clear_query_action()
+        st.rerun()
+
+    frame_indices = [row["frame_idx"] for row in clip_rows]
+    try:
+        release_frame_idx = int(st.query_params.get("stage_b_release", ""))
+        catch_frame_idx = int(st.query_params.get("stage_b_catch", ""))
+    except ValueError:
+        clear_query_action()
+        st.rerun()
+
+    release_frame_idx, catch_frame_idx = clamp_event_order(frame_indices, release_frame_idx, catch_frame_idx)
+    usable = st.query_params.get("stage_b_usable", "1") == "1"
+    notes = st.query_params.get("stage_b_notes", "")
+    save_manual_event(
+        clip_rows=clip_rows,
+        weak_event=weak_events.get(clip_id),
+        release_frame_idx=release_frame_idx,
+        catch_frame_idx=catch_frame_idx,
+        usable=usable,
+        notes=notes,
+    )
+    clear_query_action()
+    st.rerun()
+
+
 def get_next_clip_id(clip_ids: list[str], manual_rows: list[dict]) -> str | None:
     """Return the next unlabeled clip id."""
     labeled_clip_ids = {row["clip_id"] for row in manual_rows}
@@ -217,8 +289,55 @@ def inject_hotkeys() -> None:
         <script>
         const win = window.parent;
         const doc = window.parent.document;
-        if (!win.__stageBHotkeysBoundV2) {
-          win.__stageBHotkeysBoundV2 = true;
+        if (!win.__stageBHotkeysBoundV3) {
+          win.__stageBHotkeysBoundV3 = true;
+          const triggerQueryAction = (action, usable) => {
+            if (win.__stageBHotkeySubmitting) {
+              return true;
+            }
+            const state = doc.querySelector("[data-stage-b-current='1']");
+            if (!state) {
+              return false;
+            }
+            win.__stageBHotkeySubmitting = true;
+            const params = new URLSearchParams(win.location.search);
+            params.set("stage_b_action", action);
+            params.set("stage_b_nonce", String(Date.now()));
+            if (action === "save") {
+              params.set("stage_b_clip_id", state.dataset.clipId);
+              params.set("stage_b_release", state.dataset.releaseFrame);
+              params.set("stage_b_catch", state.dataset.catchFrame);
+              params.set("stage_b_usable", usable ? "1" : "0");
+              const notesInput = Array.from(doc.querySelectorAll("input")).find(
+                input => input.getAttribute("aria-label") === "Notes"
+              );
+              params.set("stage_b_notes", notesInput ? notesInput.value : "");
+            }
+            win.location.search = params.toString();
+            return true;
+          };
+          const handleDirectAction = (event) => {
+            const key = event.key.toLowerCase();
+            const code = event.code;
+            const isEnter = key === "enter" || code === "Enter" || code === "NumpadEnter";
+            if (isEnter) {
+              event.preventDefault();
+              event.stopPropagation();
+              event.stopImmediatePropagation();
+              triggerQueryAction("save", true);
+            } else if (key === "u") {
+              event.preventDefault();
+              event.stopPropagation();
+              event.stopImmediatePropagation();
+              triggerQueryAction("save", false);
+            } else if (key === "z") {
+              event.preventDefault();
+              event.stopPropagation();
+              event.stopImmediatePropagation();
+              triggerQueryAction("undo", false);
+            }
+          };
+          win.addEventListener("keyup", handleDirectAction, true);
           win.addEventListener("keydown", function(event) {
             const activeTag = doc.activeElement ? doc.activeElement.tagName : "";
             const key = event.key.toLowerCase();
@@ -246,11 +365,26 @@ def inject_hotkeys() -> None:
             } else if (key === "l") {
               clickByPrefix("Catch +1");
             } else if (isEnter) {
-              clickByPrefix("Save Usable");
+              event.preventDefault();
+              event.stopPropagation();
+              event.stopImmediatePropagation();
+              if (!triggerQueryAction("save", true)) {
+                clickByPrefix("Save Usable");
+              }
             } else if (key === "u") {
-              clickByPrefix("Mark Unusable");
+              event.preventDefault();
+              event.stopPropagation();
+              event.stopImmediatePropagation();
+              if (!triggerQueryAction("save", false)) {
+                clickByPrefix("Mark Unusable");
+              }
             } else if (key === "z") {
-              clickByPrefix("Undo");
+              event.preventDefault();
+              event.stopPropagation();
+              event.stopImmediatePropagation();
+              if (!triggerQueryAction("undo", false)) {
+                clickByPrefix("Undo");
+              }
             } else if (key === "s") {
               clickByPrefix("Release -Jump");
             } else if (key === "f") {
@@ -285,6 +419,9 @@ def main() -> None:
 
     grouped_rows = group_frame_rows(frame_rows)
     weak_events = load_weak_events()
+    manual_rows = load_manual_events()
+    process_query_action(grouped_rows, weak_events, manual_rows)
+
     manual_rows = load_manual_events()
     clip_ids = sorted(grouped_rows)
     next_clip_id = get_next_clip_id(clip_ids, manual_rows)
@@ -377,6 +514,15 @@ def main() -> None:
     utility_cols[2].caption(f"Selected window: {st.session_state.release_frame_idx} -> {st.session_state.catch_frame_idx}")
 
     notes = st.text_input("Notes", key="notes")
+    st.markdown(
+        (
+            "<span data-stage-b-current='1' "
+            f"data-clip-id='{next_clip_id}' "
+            f"data-release-frame='{st.session_state.release_frame_idx}' "
+            f"data-catch-frame='{st.session_state.catch_frame_idx}'></span>"
+        ),
+        unsafe_allow_html=True,
+    )
 
     zoom_cols = st.columns(2)
     zoom_cols[0].markdown("**Release Zoom**")
