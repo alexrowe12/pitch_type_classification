@@ -17,7 +17,14 @@ os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
 import numpy as np
 import torch
-from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, precision_score, recall_score
+from sklearn.metrics import (
+    accuracy_score,
+    balanced_accuracy_score,
+    confusion_matrix,
+    f1_score,
+    precision_score,
+    recall_score,
+)
 from torch import nn
 from torch.utils.data import DataLoader, Subset
 
@@ -169,9 +176,11 @@ def evaluate(model, loader, criterion, device) -> dict:
         return {
             "loss": 0.0,
             "accuracy": 0.0,
+            "balanced_accuracy": 0.0,
             "precision": 0.0,
             "recall": 0.0,
             "f1": 0.0,
+            "macro_f1": 0.0,
             "confusion_matrix": [[0, 0], [0, 0]],
             "predictions": [],
         }
@@ -188,12 +197,21 @@ def evaluate(model, loader, criterion, device) -> dict:
     return {
         "loss": total_loss / max(1, total_examples),
         "accuracy": float(accuracy_score(y_true, y_pred)),
+        "balanced_accuracy": float(balanced_accuracy_score(y_true, y_pred)),
         "precision": float(precision_score(y_true, y_pred, zero_division=0)),
         "recall": float(recall_score(y_true, y_pred, zero_division=0)),
         "f1": float(f1_score(y_true, y_pred, zero_division=0)),
+        "macro_f1": float(f1_score(y_true, y_pred, average="macro", zero_division=0)),
         "confusion_matrix": confusion_matrix(y_true, y_pred, labels=[0, 1]).tolist(),
         "predictions": predictions,
     }
+
+
+def selection_score(metrics: dict, metric_name: str) -> float:
+    """Return the validation score used for best-checkpoint selection."""
+    if metric_name not in metrics:
+        raise ValueError(f"Unknown selection metric: {metric_name}")
+    return float(metrics[metric_name])
 
 
 def save_json(path: Path, payload: dict) -> None:
@@ -261,7 +279,7 @@ def main() -> None:
     parser.add_argument("--variant-root", type=Path, default=VARIANTS_DIR, help="Variant dataset root")
     parser.add_argument(
         "--model",
-        choices=["small_3d_cnn", "small_3d_cnn_gn", "frame_cnn_pool", "frame_cnn_pool_gn"],
+        choices=["small_3d_cnn", "small_3d_cnn_gn", "frame_cnn_pool", "frame_cnn_pool_gn", "resnet18_frame_pool"],
         default="small_3d_cnn",
         help="Model architecture",
     )
@@ -291,6 +309,12 @@ def main() -> None:
         choices=["same", "cpu"],
         default="same",
         help="Device used for validation metrics and best-checkpoint selection.",
+    )
+    parser.add_argument(
+        "--selection-metric",
+        choices=["balanced_accuracy", "macro_f1", "accuracy", "f1"],
+        default="balanced_accuracy",
+        help="Validation metric used to save best_model.pt. balanced_accuracy avoids one-class checkpoints.",
     )
     parser.add_argument("--num-workers", type=int, default=0, help="DataLoader worker count")
     args = parser.parse_args()
@@ -338,8 +362,10 @@ def main() -> None:
     print(f"Train samples: {len(train_dataset)}, val samples: {len(val_dataset)}", flush=True)
     print(f"Cache data: {args.cache_data}, train_eval_interval={args.train_eval_interval}", flush=True)
     print(f"Selection device: {selection_device}", flush=True)
+    print(f"Selection metric: {args.selection_metric}", flush=True)
 
-    best_f1 = -1.0
+    best_score = -1.0
+    best_loss = float("inf")
     history = []
     best_metrics = {}
     for epoch in range(args.epochs):
@@ -373,28 +399,38 @@ def main() -> None:
             "epoch": epoch + 1,
             "train_loss": train_loss,
             "train_accuracy": train_metrics["accuracy"] if train_metrics else None,
+            "train_balanced_accuracy": train_metrics["balanced_accuracy"] if train_metrics else None,
             "train_f1": train_metrics["f1"] if train_metrics else None,
+            "train_macro_f1": train_metrics["macro_f1"] if train_metrics else None,
             "val_loss": val_metrics["loss"],
             "val_accuracy": val_metrics["accuracy"],
+            "val_balanced_accuracy": val_metrics["balanced_accuracy"],
             "val_f1": val_metrics["f1"],
+            "val_macro_f1": val_metrics["macro_f1"],
         }
         history.append(epoch_metrics)
 
         train_summary = (
-            f"train_acc={train_metrics['accuracy']:.3f} train_f1={train_metrics['f1']:.3f} "
+            f"train_acc={train_metrics['accuracy']:.3f} train_bal_acc={train_metrics['balanced_accuracy']:.3f} "
+            f"train_f1={train_metrics['f1']:.3f} train_macro_f1={train_metrics['macro_f1']:.3f} "
             if train_metrics
-            else "train_acc=skipped train_f1=skipped "
+            else "train_acc=skipped train_bal_acc=skipped train_f1=skipped train_macro_f1=skipped "
         )
         print(
             f"Epoch {epoch + 1}/{args.epochs} "
             f"train_loss={train_loss:.4f} {train_summary}"
             f"val_loss={val_metrics['loss']:.4f} val_acc={val_metrics['accuracy']:.3f} "
-            f"val_f1={val_metrics['f1']:.3f}",
+            f"val_bal_acc={val_metrics['balanced_accuracy']:.3f} val_f1={val_metrics['f1']:.3f} "
+            f"val_macro_f1={val_metrics['macro_f1']:.3f}",
             flush=True,
         )
 
-        if val_metrics["f1"] > best_f1:
-            best_f1 = val_metrics["f1"]
+        current_score = selection_score(val_metrics, args.selection_metric)
+        is_better_score = current_score > best_score
+        is_tie_with_lower_loss = current_score == best_score and val_metrics["loss"] < best_loss
+        if is_better_score or is_tie_with_lower_loss:
+            best_score = current_score
+            best_loss = val_metrics["loss"]
             best_metrics = val_metrics
             torch.save(checkpoint_payload(model, args, input_channels), run_dir / "best_model.pt")
 
@@ -409,6 +445,8 @@ def main() -> None:
         "seed": args.seed,
         "device": str(device),
         "selection_device": str(selection_device),
+        "selection_metric": args.selection_metric,
+        "best_selection_score": best_score,
         "train_samples": len(train_dataset),
         "val_samples": len(val_dataset),
         "overfit_samples": args.overfit_samples,

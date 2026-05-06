@@ -2,6 +2,7 @@
 
 import torch
 from torch import nn
+from torchvision import models
 
 
 def norm_2d(kind: str, channels: int) -> nn.Module:
@@ -101,6 +102,45 @@ class FrameCNNPool(nn.Module):
         return self.classifier(sequence_features)
 
 
+class ResNet18FramePool(nn.Module):
+    """Transfer-learning baseline: frozen ResNet-18 frame encoder plus temporal pooling."""
+
+    def __init__(self, input_channels: int, num_classes: int = 2, dropout: float = 0.35):
+        super().__init__()
+        if input_channels != 3:
+            raise ValueError("resnet18_frame_pool requires the rgb variant with 3 input channels")
+
+        weights = models.ResNet18_Weights.DEFAULT
+        backbone = models.resnet18(weights=weights)
+        feature_dim = backbone.fc.in_features
+        backbone.fc = nn.Identity()
+        for parameter in backbone.parameters():
+            parameter.requires_grad = False
+
+        self.backbone = backbone
+        self.register_buffer("image_mean", torch.tensor(weights.transforms().mean).view(1, 3, 1, 1))
+        self.register_buffer("image_std", torch.tensor(weights.transforms().std).view(1, 3, 1, 1))
+        self.classifier = nn.Sequential(
+            nn.Dropout(dropout),
+            nn.Linear(feature_dim * 2, 256),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.Linear(256, num_classes),
+        )
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        """Return class logits for RGB inputs shaped (B, 3, T, H, W)."""
+        batch_size, channels, frames, height, width = inputs.shape
+        frame_inputs = inputs.permute(0, 2, 1, 3, 4).reshape(batch_size * frames, channels, height, width)
+        frame_inputs = (frame_inputs - self.image_mean) / self.image_std
+        frame_features = self.backbone(frame_inputs)
+        frame_features = frame_features.reshape(batch_size, frames, -1)
+        mean_features = frame_features.mean(dim=1)
+        max_features = frame_features.max(dim=1).values
+        sequence_features = torch.cat([mean_features, max_features], dim=1)
+        return self.classifier(sequence_features)
+
+
 def build_model(model_name: str, input_channels: int, dropout: float = 0.35) -> nn.Module:
     """Build a model by name."""
     if model_name == "small_3d_cnn":
@@ -111,4 +151,6 @@ def build_model(model_name: str, input_channels: int, dropout: float = 0.35) -> 
         return FrameCNNPool(input_channels=input_channels, dropout=dropout)
     if model_name == "frame_cnn_pool_gn":
         return FrameCNNPool(input_channels=input_channels, dropout=dropout, norm="group")
+    if model_name == "resnet18_frame_pool":
+        return ResNet18FramePool(input_channels=input_channels, dropout=dropout)
     raise ValueError(f"Unknown model: {model_name}")

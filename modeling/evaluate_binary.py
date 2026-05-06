@@ -98,6 +98,8 @@ def main() -> None:
             "train_samples": run_metrics.get("train_samples"),
             "val_samples": run_metrics.get("val_samples"),
             "selection_device": run_metrics.get("selection_device"),
+            "selection_metric": run_metrics.get("selection_metric"),
+            "best_selection_score": run_metrics.get("best_selection_score"),
             "best_val_metrics": run_metrics.get("best_val_metrics"),
         },
         "metrics": {key: value for key, value in metrics.items() if key != "predictions"},
@@ -112,9 +114,11 @@ def main() -> None:
     print(f"Run: {args.run_id}")
     print(f"Split: {args.split}, samples={len(dataset)}")
     print(f"accuracy={metrics['accuracy']:.4f}")
+    print(f"balanced_accuracy={metrics['balanced_accuracy']:.4f}")
     print(f"precision={metrics['precision']:.4f}")
     print(f"recall={metrics['recall']:.4f}")
     print(f"f1={metrics['f1']:.4f}")
+    print(f"macro_f1={metrics['macro_f1']:.4f}")
     print(f"confusion_matrix={metrics['confusion_matrix']}")
     print(f"Saved metrics to: {metrics_path}")
     print(f"Saved predictions to: {predictions_path}")
